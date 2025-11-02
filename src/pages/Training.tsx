@@ -278,10 +278,11 @@ export default function Training() {
               <div className="rounded-lg border border-border bg-muted/30 p-3">
                 <div className="font-semibold mb-2">⚡ Realistic Settings</div>
                 <div className="space-y-1 text-muted-foreground">
-                  <div>• Stop: <span className="text-red-500 font-mono">1.5×ATR</span></div>
-                  <div>• Target: <span className="text-green-500 font-mono">3.5%</span> fixed</div>
+                  <div>• Stop: <span className="text-red-500 font-mono">2.0×ATR</span></div>
+                  <div>• Target: <span className="text-green-500 font-mono">3.0%</span> fixed</div>
                   <div>• Max Hold: <span className="font-mono">12 bars</span> (1hr)</div>
-                  <div>• Fees: <span className="font-mono">0.12%</span> | Slip: <span className="font-mono">0.08%</span></div>
+                  <div>• Fees: <span className="font-mono">0.15%</span> | Slip: <span className="font-mono">0.12%</span></div>
+                  <div>• Market noise: <span className="font-mono">±10%</span> variance</div>
                 </div>
               </div>
               

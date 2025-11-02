@@ -229,10 +229,10 @@ function simulateTradeOutcome(
   const entryPrice = Number(entryBar.close);
   
   // REALISTIC risk management parameters
-  const stopLossDistance = atr * 1.5; // Tight 1.5x ATR stop
-  const takeProfitPct = 3.5; // 3.5% target (realistic with leverage)
-  const slippagePct = 0.08; // Slippage from entries
-  const feesPct = 0.12; // Trading fees
+  const stopLossDistance = atr * 2.0; // Tighter 2.0x ATR stop (was 1.5x)
+  const takeProfitPct = 3.0; // Smaller 3.0% target (was 3.5%)
+  const slippagePct = 0.12; // Higher slippage (was 0.08%)
+  const feesPct = 0.15; // Higher fees (was 0.12%)
   
   const stopLossPrice = side === "BUY" 
     ? entryPrice - stopLossDistance 
@@ -306,12 +306,22 @@ function simulateTradeOutcome(
   const rewardScaleFactor = ACCOUNT_EQUITY / 1000;
   let reward = dollarPnl / rewardScaleFactor;
   
+  // Add noise/variance to make it more realistic
+  // Real markets have variance that's hard to predict
+  const marketNoise = (Math.random() - 0.5) * 0.2; // ±10% random noise
+  reward += reward * marketNoise;
+  
   // Bonus/penalty for position sizing optimization
   // If we won with high confidence (large position), extra reward
   // If we lost with high confidence (large position), extra penalty
   // If we won/lost with low confidence (small position), less impact
   const sizingBonus = reward * (positionData.confidenceFactor - 0.5); // ±50% based on sizing
   reward += sizingBonus * 0.3; // 30% weight on sizing optimization
+  
+  // Penalty for bad exits (stopped out)
+  if (exitReason === "STOP_LOSS") {
+    reward *= 1.2; // 20% worse penalty for getting stopped
+  }
   
   return {
     reward,
@@ -476,8 +486,9 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       
     } else {
       actionCounts.hold++;
-      // HOLD: small penalty, move to next bar
-      reward = -0.05;
+      // HOLD: significant penalty to discourage inaction
+      // Opportunity cost + time decay
+      reward = -0.15; // Increased from -0.05 to make holding more costly
       totalReward += reward;
       
       if (i + 1 < bars.length) {
