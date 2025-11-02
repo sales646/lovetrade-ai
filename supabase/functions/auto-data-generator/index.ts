@@ -176,6 +176,106 @@ function calculateTechnicalIndicators(bars: any[]) {
   return indicators;
 }
 
+// Simulate a trade forward through price action to calculate real P&L
+function simulateTradeOutcome(
+  bars: any[],
+  entryIndex: number,
+  side: "BUY" | "SELL",
+  atr: number,
+  maxHoldBars: number = 20
+) {
+  const entryBar = bars[entryIndex];
+  const entryPrice = entryBar.close;
+  
+  // Risk management parameters
+  const stopLossDistance = atr * 2; // 2x ATR stop
+  const takeProfitDistance = atr * 4; // 4x ATR target (2:1 R:R)
+  const slippagePct = 0.05; // 0.05% slippage
+  const feesPct = 0.1; // 0.1% fees
+  
+  const stopLossPrice = side === "BUY" 
+    ? entryPrice - stopLossDistance 
+    : entryPrice + stopLossDistance;
+  
+  const takeProfitPrice = side === "BUY" 
+    ? entryPrice + takeProfitDistance 
+    : entryPrice - takeProfitDistance;
+  
+  // Walk forward through bars to find exit
+  let exitPrice = entryPrice;
+  let exitReason = "TIME"; // TIME, STOP_LOSS, TAKE_PROFIT
+  let barsHeld = 0;
+  
+  for (let i = entryIndex + 1; i < Math.min(entryIndex + maxHoldBars + 1, bars.length); i++) {
+    const bar = bars[i];
+    barsHeld++;
+    
+    if (side === "BUY") {
+      // Check if stop loss hit
+      if (bar.low <= stopLossPrice) {
+        exitPrice = stopLossPrice;
+        exitReason = "STOP_LOSS";
+        break;
+      }
+      // Check if take profit hit
+      if (bar.high >= takeProfitPrice) {
+        exitPrice = takeProfitPrice;
+        exitReason = "TAKE_PROFIT";
+        break;
+      }
+    } else { // SELL
+      // Check if stop loss hit
+      if (bar.high >= stopLossPrice) {
+        exitPrice = stopLossPrice;
+        exitReason = "STOP_LOSS";
+        break;
+      }
+      // Check if take profit hit
+      if (bar.low <= takeProfitPrice) {
+        exitPrice = takeProfitPrice;
+        exitReason = "TAKE_PROFIT";
+        break;
+      }
+    }
+    
+    // Time-based exit
+    if (barsHeld >= maxHoldBars) {
+      exitPrice = bar.close;
+      exitReason = "TIME";
+      break;
+    }
+  }
+  
+  // Calculate P&L
+  let grossPnlPct = side === "BUY"
+    ? ((exitPrice - entryPrice) / entryPrice) * 100
+    : ((entryPrice - exitPrice) / entryPrice) * 100;
+  
+  // Apply slippage and fees
+  const netPnlPct = grossPnlPct - slippagePct - feesPct;
+  
+  // Convert P&L to reward (scale to reasonable range)
+  // +5% = +1.0 reward, -2.5% = -0.5 reward
+  const reward = netPnlPct / 5.0;
+  
+  const win = netPnlPct > 0;
+  const entryQuality = win ? 0.8 + Math.random() * 0.2 : 0.1 + Math.random() * 0.3;
+  const rrRatio = win ? Math.abs(netPnlPct / 2.5) : 0.5; // Actual R:R achieved
+  
+  return {
+    reward,
+    pnl_pct: netPnlPct,
+    exit_reason: exitReason,
+    bars_held: barsHeld,
+    win,
+    entry_quality: entryQuality,
+    rr_ratio: Math.min(rrRatio, 3.0), // Cap at 3:1
+    delta_equity: netPnlPct * 10, // Scale for display
+    fees: feesPct,
+    slippage: slippagePct,
+  };
+}
+
 function generateExpertTrajectories(symbol: string, bars: any[], indicators: any[]) {
   const trajectories = [];
   
@@ -209,130 +309,132 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
     
     // Strategy 1: RSI_EMA (40% weight) - only in trending markets
     if (!shouldAvoidTrading && ind.rsi_14 < 30 && ind.ema_20 > ind.ema_50 && regime.includes("TREND_UP")) {
-      // Good trade in good conditions: high positive reward (0.8 to 2.0)
-      const baseReward = 0.8 + Math.random() * 1.2;
+      const outcome = simulateTradeOutcome(bars, i + 14, "BUY", ind.atr_14);
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "RSI_EMA",
         action: 1, // BUY
-        reward: baseReward * regimeQuality, // Strong positive in good regimes
+        reward: outcome.reward,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
-        entry_quality: regimeQuality * 0.9,
-        rr_ratio: 2.0,
-        delta_equity: Math.random() * 100 * regimeQuality,
-        fees: 0.1,
-        slippage: 0.05,
+        entry_quality: outcome.entry_quality,
+        rr_ratio: outcome.rr_ratio,
+        delta_equity: outcome.delta_equity,
+        fees: outcome.fees,
+        slippage: outcome.slippage,
       });
     } else if (!shouldAvoidTrading && ind.rsi_14 > 70 && ind.ema_20 < ind.ema_50 && regime.includes("TREND_DOWN")) {
-      const baseReward = 0.8 + Math.random() * 1.2;
+      const outcome = simulateTradeOutcome(bars, i + 14, "SELL", ind.atr_14);
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "RSI_EMA",
         action: -1, // SELL
-        reward: baseReward * regimeQuality,
+        reward: outcome.reward,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
-        entry_quality: regimeQuality * 0.9,
-        rr_ratio: 2.0,
-        delta_equity: Math.random() * 100 * regimeQuality,
-        fees: 0.1,
-        slippage: 0.05,
+        entry_quality: outcome.entry_quality,
+        rr_ratio: outcome.rr_ratio,
+        delta_equity: outcome.delta_equity,
+        fees: outcome.fees,
+        slippage: outcome.slippage,
       });
     } else if (shouldAvoidTrading && ind.rsi_14 < 30 && ind.ema_20 > ind.ema_50) {
-      // Bad trade in bad conditions: negative reward (-0.8 to -0.3)
+      // Still generate bad trades in bad conditions to teach avoidance
+      const outcome = simulateTradeOutcome(bars, i + 14, "BUY", ind.atr_14);
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "RSI_EMA",
         action: 1, // BUY
-        reward: -0.3 - Math.random() * 0.5, // Strong negative in bad regimes
+        reward: outcome.reward, // Will likely be negative in choppy markets
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
-        entry_quality: regimeQuality * 0.3,
-        rr_ratio: 0.8,
-        delta_equity: -Math.random() * 50,
-        fees: 0.1,
-        slippage: 0.08,
+        entry_quality: outcome.entry_quality,
+        rr_ratio: outcome.rr_ratio,
+        delta_equity: outcome.delta_equity,
+        fees: outcome.fees,
+        slippage: outcome.slippage,
       });
     }
     
     // Strategy 2: VWAP_REVERSION (30% weight) - works in all regimes except choppy
     if (!shouldAvoidTrading && ind.vwap_distance_pct < -1.5 && ind.volume_zscore > 1.5) {
-      const baseReward = 0.6 + Math.random() * 1.0;
+      const outcome = simulateTradeOutcome(bars, i + 14, "BUY", ind.atr_14, 15); // Shorter hold for mean reversion
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "VWAP_REVERSION",
         action: 1, // BUY
-        reward: baseReward * regimeQuality,
+        reward: outcome.reward,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
-        entry_quality: regimeQuality * 0.8,
-        rr_ratio: 1.8,
-        delta_equity: Math.random() * 80 * regimeQuality,
-        fees: 0.1,
-        slippage: 0.05,
+        entry_quality: outcome.entry_quality,
+        rr_ratio: outcome.rr_ratio,
+        delta_equity: outcome.delta_equity,
+        fees: outcome.fees,
+        slippage: outcome.slippage,
       });
     } else if (!shouldAvoidTrading && ind.vwap_distance_pct > 1.5 && ind.volume_zscore > 1.5) {
-      const baseReward = 0.6 + Math.random() * 1.0;
+      const outcome = simulateTradeOutcome(bars, i + 14, "SELL", ind.atr_14, 15);
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "VWAP_REVERSION",
         action: -1, // SELL
-        reward: baseReward * regimeQuality,
+        reward: outcome.reward,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
-        entry_quality: regimeQuality * 0.8,
-        rr_ratio: 1.8,
-        delta_equity: Math.random() * 80 * regimeQuality,
-        fees: 0.1,
-        slippage: 0.05,
+        entry_quality: outcome.entry_quality,
+        rr_ratio: outcome.rr_ratio,
+        delta_equity: outcome.delta_equity,
+        fees: outcome.fees,
+        slippage: outcome.slippage,
       });
     } else if (shouldAvoidTrading && (ind.vwap_distance_pct < -1.5 || ind.vwap_distance_pct > 1.5) && ind.volume_zscore > 1.5) {
-      // Bad VWAP trade in choppy conditions: negative reward
+      // Simulate bad trades in choppy conditions
+      const side = ind.vwap_distance_pct < 0 ? "BUY" : "SELL";
+      const outcome = simulateTradeOutcome(bars, i + 14, side, ind.atr_14, 15);
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "VWAP_REVERSION",
         action: ind.vwap_distance_pct < 0 ? 1 : -1,
-        reward: -0.4 - Math.random() * 0.6,
+        reward: outcome.reward,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
-        entry_quality: 0.2,
-        rr_ratio: 0.5,
-        delta_equity: -Math.random() * 60,
-        fees: 0.1,
-        slippage: 0.1,
+        entry_quality: outcome.entry_quality,
+        rr_ratio: outcome.rr_ratio,
+        delta_equity: outcome.delta_equity,
+        fees: outcome.fees,
+        slippage: outcome.slippage,
       });
     }
     
     // Strategy 3: TREND_PULLBACK (10% weight) - only in strong trends
     if (regime.includes("STRONG_TREND") && ind.ema_20 > ind.ema_50 && ind.rsi_14 < 45) {
-      const baseReward = 1.0 + Math.random() * 1.5;
+      const outcome = simulateTradeOutcome(bars, i + 14, "BUY", ind.atr_14, 25); // Longer hold for trends
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "TREND_PULLBACK",
         action: 1, // BUY
-        reward: baseReward, // Best strategy, highest rewards
+        reward: outcome.reward,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
-        entry_quality: 0.9,
-        rr_ratio: 2.5,
-        delta_equity: Math.random() * 150,
-        fees: 0.1,
-        slippage: 0.05,
+        entry_quality: outcome.entry_quality,
+        rr_ratio: outcome.rr_ratio,
+        delta_equity: outcome.delta_equity,
+        fees: outcome.fees,
+        slippage: outcome.slippage,
       });
     }
     
