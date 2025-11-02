@@ -23,8 +23,8 @@ import gymnasium as gym
 from gymnasium import spaces
 from dotenv import load_dotenv
 
-# Load environment variables from keys.env
-load_dotenv('keys.env')
+# Load environment variables from .env
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
