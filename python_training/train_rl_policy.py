@@ -19,8 +19,8 @@ from supabase import create_client, Client
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
