@@ -380,10 +380,21 @@ class MetricsCallback(BaseCallback):
         self.episode_returns = []
     
     def _on_step(self) -> bool:
-        # Collect episode rewards
-        if len(self.locals.get("rewards", [])) > 0:
-            for reward in self.locals["rewards"]:
-                self.episode_returns.append(float(reward))
+        # Collect episode rewards from all environments
+        if "rewards" in self.locals and self.locals["rewards"] is not None:
+            rewards = self.locals["rewards"]
+            if isinstance(rewards, np.ndarray):
+                for reward in rewards.flatten():
+                    if not np.isnan(reward):
+                        self.episode_returns.append(float(reward))
+        
+        # Also collect from infos (episode completions)
+        if "infos" in self.locals:
+            for info in self.locals["infos"]:
+                if isinstance(info, dict) and "episode" in info:
+                    ep_reward = info["episode"].get("r", 0)
+                    self.episode_rewards.append(float(ep_reward))
+        
         return True
     
     def _on_rollout_end(self) -> None:
