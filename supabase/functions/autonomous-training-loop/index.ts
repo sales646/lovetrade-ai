@@ -62,12 +62,12 @@ async function runContinuousTraining() {
       await log("INFO", `🔄 Training loop iteration #${loopCount}`);
       
       // 1. Generate data
-      await log("INFO", "📊 Generating training data...");
+      await log("INFO", "📊 Generating training data from Yahoo Finance...");
       const dataResponse = await supabase.functions.invoke("auto-data-generator", {
         body: {
           symbols: ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL"],
-          barsPerSymbol: 500,
-          useRealData: false,
+          barsPerSymbol: 1000, // More bars for real data
+          useRealData: true, // Always use real market data
         }
       });
       

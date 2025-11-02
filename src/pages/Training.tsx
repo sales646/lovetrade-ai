@@ -512,11 +512,11 @@ export default function Training() {
                 <h3 className="text-xl font-bold mb-2">Master Control</h3>
                 <p className="text-sm text-muted-foreground mb-1">
                   {isSystemActive
-                    ? "🟢 System running autonomously in backend - continues even if you leave this page"
-                    : "⚪ System stopped - click Start to begin autonomous training"}
+                    ? "🟢 System running autonomously with REAL Yahoo Finance data"
+                    : "⚪ System stopped - click Start to begin training on real market data"}
                 </p>
                 <p className="text-xs text-muted-foreground mt-2">
-                  Backend loop: Data generation → Training → 30s wait → Repeat
+                  Backend loop: Real market data (1000 bars) → Training (10 episodes) → 30s wait → Repeat
                 </p>
               </div>
               <div className="flex flex-col gap-2">
