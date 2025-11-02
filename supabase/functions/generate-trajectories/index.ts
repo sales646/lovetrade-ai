@@ -418,17 +418,12 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     );
 
-    // Fetch technical indicators and join with historical bars for OHLCV data
+    // Fetch technical indicators
     const { data: indicators, error: indError } = await supabaseAdmin
       .from("technical_indicators")
-      .select(`
-        *,
-        bars:historical_bars!inner(close, open, high, low, volume)
-      `)
+      .select("*")
       .eq("symbol", symbol)
       .eq("timeframe", timeframe)
-      .eq("historical_bars.symbol", symbol)
-      .eq("historical_bars.timeframe", timeframe)
       .order("timestamp", { ascending: true })
       .gte("timestamp", start_date || "1970-01-01")
       .lte("timestamp", end_date || "2100-01-01");
@@ -441,22 +436,44 @@ serve(async (req) => {
       );
     }
 
+    // Fetch historical bars (for OHLCV data)
+    const { data: bars, error: barsError } = await supabaseAdmin
+      .from("historical_bars")
+      .select("*")
+      .eq("symbol", symbol)
+      .eq("timeframe", timeframe)
+      .order("timestamp", { ascending: true })
+      .gte("timestamp", start_date || "1970-01-01")
+      .lte("timestamp", end_date || "2100-01-01");
+
+    if (barsError || !bars || bars.length === 0) {
+      console.error("Error fetching bars:", barsError);
+      return new Response(
+        JSON.stringify({ error: "No historical bars available. Run fetch-market-data first." }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Match indicators with bars by timestamp
+    const barsMap = new Map(bars.map(b => [b.timestamp, b]));
+    const flatIndicators = indicators.map(ind => {
+      const bar = barsMap.get(ind.timestamp);
+      return {
+        ...ind,
+        close: bar?.close,
+        open: bar?.open,
+        high: bar?.high,
+        low: bar?.low,
+        volume: bar?.volume,
+      };
+    }).filter(ind => ind.close !== undefined); // Remove entries without matching bars
+
     // Fetch news features
     const { data: newsData } = await supabaseAdmin
       .from("news_features")
       .select("*")
       .eq("symbol", symbol)
       .order("timestamp", { ascending: false });
-
-    // Flatten the joined data
-    const flatIndicators = indicators.map(ind => ({
-      ...ind,
-      close: ind.bars[0]?.close,
-      open: ind.bars[0]?.open,
-      high: ind.bars[0]?.high,
-      low: ind.bars[0]?.low,
-      volume: ind.bars[0]?.volume,
-    }));
 
     // Log sample indicator values for debugging
     if (flatIndicators && flatIndicators.length > 0) {
