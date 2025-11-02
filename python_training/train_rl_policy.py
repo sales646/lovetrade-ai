@@ -323,9 +323,10 @@ class TradingEnv(gym.Env):
         
         # Move to next trajectory
         self.current_idx = (self.current_idx + 1) % len(self.trajectories)
-        done = False  # Continuous environment
+        terminated = False  # Continuous environment
+        truncated = False
         
-        return self._get_obs(), normalized_reward, done, {}
+        return self._get_obs(), normalized_reward, terminated, truncated, {}
     
     def _get_obs(self) -> np.ndarray:
         traj = self.trajectories[self.current_idx]
