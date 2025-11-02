@@ -519,6 +519,13 @@ serve(async (req) => {
         for (const signal of strategySignals) {
           const close = Number(features.close);
           const atr = Number(features.atr_14);
+          
+          // Skip if invalid data
+          if (!isFinite(close) || !isFinite(atr) || close <= 0 || atr <= 0) {
+            console.warn(`Skipping trajectory due to invalid data: close=${close}, atr=${atr}`);
+            continue;
+          }
+          
           const target_r = 1.5; // 1.5R target
           
           // Simulate trade outcome based on next K bars (simplified: use ATR)
@@ -531,6 +538,12 @@ serve(async (req) => {
           
           // Final reward with risk adjustment
           const reward = delta_equity - fees_per_trade - slippage - drawdown_penalty;
+          
+          // Validate reward is finite
+          if (!isFinite(reward)) {
+            console.warn(`Skipping trajectory due to invalid reward: ${reward}`);
+            continue;
+          }
           
           // Get next observation (if available)
           const next_obs = i + 1 < indicators.length ? {
