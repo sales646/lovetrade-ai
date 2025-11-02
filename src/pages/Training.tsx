@@ -8,6 +8,7 @@ import { Progress } from "@/components/ui/progress";
 import { Brain, Zap, TrendingUp, Activity, Cpu, Target, Play, Pause, Database, RefreshCw } from "lucide-react";
 import { useStartAutonomousTraining, useRLMetrics, useQState } from "@/lib/api/autonomous-training";
 import { useGenerateTrainingData } from "@/lib/api/data-generation";
+import { useLocalGPUTrainingStatus } from "@/lib/api/training";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { toast } from "sonner";
@@ -23,6 +24,7 @@ export default function Training() {
   const generateData = useGenerateTrainingData();
   const { data: metrics } = useRLMetrics();
   const { data: qState } = useQState();
+  const { data: localGPUStatus } = useLocalGPUTrainingStatus();
 
   const handleStartTraining = () => {
     startTraining.mutate(iterations);
@@ -152,16 +154,24 @@ export default function Training() {
       {/* Header */}
       <div className="relative overflow-hidden rounded-2xl border border-border bg-gradient-to-br from-card via-card to-card/50 p-8">
         <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-primary/20 via-transparent to-transparent opacity-50" />
-        <div className="relative flex items-center gap-4">
-          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10">
-            <Brain className="h-8 w-8 text-primary" />
+        <div className="relative flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10">
+              <Brain className="h-8 w-8 text-primary" />
+            </div>
+            <div>
+              <h2 className="mb-2 text-3xl font-bold">Autonomous RL Training</h2>
+              <p className="text-muted-foreground">
+                Continuous Q-Learning with epsilon-greedy exploration and reward shaping
+              </p>
+            </div>
           </div>
-          <div>
-            <h2 className="mb-2 text-3xl font-bold">Autonomous RL Training</h2>
-            <p className="text-muted-foreground">
-              Continuous Q-Learning with epsilon-greedy exploration and reward shaping
-            </p>
-          </div>
+          {localGPUStatus?.isActive && (
+            <Badge variant="default" className="animate-pulse flex items-center gap-2">
+              <Cpu className="h-4 w-4" />
+              Local GPU Active ({localGPUStatus.activeCount} worker{localGPUStatus.activeCount !== 1 ? 's' : ''})
+            </Badge>
+          )}
         </div>
       </div>
 
@@ -525,6 +535,89 @@ export default function Training() {
                 </li>
               </ul>
             </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Local GPU Training */}
+      <Card className="border-2 border-primary/20 bg-primary/5">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Cpu className="h-5 w-5 text-primary" />
+                Local GPU Training
+              </CardTitle>
+              <CardDescription>
+                Train with your CUDA GPU for 5-10x faster training
+              </CardDescription>
+            </div>
+            {localGPUStatus?.isActive && (
+              <Badge variant="default" className="animate-pulse">
+                <Activity className="mr-1 h-3 w-3" />
+                {localGPUStatus.activeCount} Active
+              </Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            <div className="rounded-lg border border-primary/30 bg-card p-4">
+              <h4 className="font-semibold mb-3 flex items-center gap-2">
+                <Zap className="h-4 w-4 text-primary" />
+                Quick Start Guide
+              </h4>
+              <ol className="space-y-2 text-sm text-muted-foreground">
+                <li className="flex items-start gap-2">
+                  <span className="font-bold text-primary">1.</span>
+                  <span>Open <code className="px-1 py-0.5 bg-muted rounded text-xs">python_training</code> folder</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="font-bold text-primary">2.</span>
+                  <span>Double-click <code className="px-1 py-0.5 bg-muted rounded text-xs">START_GPU_TRAINING.bat</code> (single run) or <code className="px-1 py-0.5 bg-muted rounded text-xs">START_PARALLEL_GPU_TRAINING.bat</code> (5 workers)</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="font-bold text-primary">3.</span>
+                  <span>Training metrics will automatically appear in this dashboard!</span>
+                </li>
+              </ol>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="rounded-lg border border-border bg-muted/50 p-3">
+                <h5 className="font-medium text-sm mb-1">Single Training</h5>
+                <p className="text-xs text-muted-foreground mb-2">BC + PPO in ~2-5 min</p>
+                <code className="text-xs bg-card px-2 py-1 rounded block">START_GPU_TRAINING.bat</code>
+              </div>
+              <div className="rounded-lg border border-border bg-muted/50 p-3">
+                <h5 className="font-medium text-sm mb-1">Parallel (5 Workers)</h5>
+                <p className="text-xs text-muted-foreground mb-2">5x throughput, continuous</p>
+                <code className="text-xs bg-card px-2 py-1 rounded block">START_PARALLEL_GPU_TRAINING.bat</code>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-primary/20 bg-primary/5 p-3">
+              <p className="text-xs text-muted-foreground">
+                <strong className="text-primary">Architecture:</strong> Cloud auto-generates training data every 60s → 
+                Your GPU trains BC+PPO policies → Results sync to this dashboard in real-time
+              </p>
+            </div>
+
+            {localGPUStatus?.recentRuns && localGPUStatus.recentRuns.length > 0 && (
+              <div className="rounded-lg border border-border bg-card p-3">
+                <h5 className="font-medium text-sm mb-2">Recent Local Runs</h5>
+                <div className="space-y-1">
+                  {localGPUStatus.recentRuns.slice(0, 3).map((run) => (
+                    <div key={run.id} className="flex items-center justify-between text-xs">
+                      <span className="text-muted-foreground">{run.run_name}</span>
+                      <Badge variant={run.status === "running" ? "default" : "secondary"} className="text-xs">
+                        {run.status}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>

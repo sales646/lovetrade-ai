@@ -170,3 +170,38 @@ export function useTrajectoryStats() {
     },
   });
 }
+
+/**
+ * Hook to check for active local GPU training
+ */
+export function useLocalGPUTrainingStatus() {
+  return useQuery({
+    queryKey: ["local-gpu-status"],
+    queryFn: async () => {
+      // Check for training runs created in last 5 minutes
+      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      
+      const { data, error } = await supabase
+        .from("training_runs")
+        .select("id, run_name, status, phase, started_at")
+        .gte("started_at", fiveMinutesAgo)
+        .order("started_at", { ascending: false })
+        .limit(5);
+
+      if (error) throw error;
+      
+      const activeRuns = data?.filter(run => run.status === "running") || [];
+      const recentCompletedRuns = data?.filter(run => 
+        run.status === "completed" && 
+        new Date(run.started_at).getTime() > Date.now() - 2 * 60 * 1000 // Last 2 min
+      ) || [];
+      
+      return {
+        isActive: activeRuns.length > 0 || recentCompletedRuns.length > 0,
+        activeCount: activeRuns.length,
+        recentRuns: data || [],
+      };
+    },
+    refetchInterval: 10000, // Check every 10 seconds
+  });
+}
