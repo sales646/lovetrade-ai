@@ -209,13 +209,15 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
     
     // Strategy 1: RSI_EMA (40% weight) - only in trending markets
     if (!shouldAvoidTrading && ind.rsi_14 < 30 && ind.ema_20 > ind.ema_50 && regime.includes("TREND_UP")) {
+      // Good trade in good conditions: high positive reward (0.8 to 2.0)
+      const baseReward = 0.8 + Math.random() * 1.2;
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "RSI_EMA",
         action: 1, // BUY
-        reward: (Math.random() * 2 - 0.5) * regimeQuality, // Reward scaled by regime quality
+        reward: baseReward * regimeQuality, // Strong positive in good regimes
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
         entry_quality: regimeQuality * 0.9,
@@ -225,13 +227,14 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
         slippage: 0.05,
       });
     } else if (!shouldAvoidTrading && ind.rsi_14 > 70 && ind.ema_20 < ind.ema_50 && regime.includes("TREND_DOWN")) {
+      const baseReward = 0.8 + Math.random() * 1.2;
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "RSI_EMA",
         action: -1, // SELL
-        reward: (Math.random() * 2 - 0.5) * regimeQuality,
+        reward: baseReward * regimeQuality,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
         entry_quality: regimeQuality * 0.9,
@@ -240,17 +243,35 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
         fees: 0.1,
         slippage: 0.05,
       });
+    } else if (shouldAvoidTrading && ind.rsi_14 < 30 && ind.ema_20 > ind.ema_50) {
+      // Bad trade in bad conditions: negative reward (-0.8 to -0.3)
+      trajectories.push({
+        symbol,
+        timeframe: "5m",
+        timestamp: ind.timestamp,
+        tactic_id: "RSI_EMA",
+        action: 1, // BUY
+        reward: -0.3 - Math.random() * 0.5, // Strong negative in bad regimes
+        obs_features: { frame_stack: frameStack, current: ind },
+        regime_tag: regime,
+        entry_quality: regimeQuality * 0.3,
+        rr_ratio: 0.8,
+        delta_equity: -Math.random() * 50,
+        fees: 0.1,
+        slippage: 0.08,
+      });
     }
     
     // Strategy 2: VWAP_REVERSION (30% weight) - works in all regimes except choppy
-    if (regime !== "CHOPPY" && ind.vwap_distance_pct < -1.5 && ind.volume_zscore > 1.5) {
+    if (!shouldAvoidTrading && ind.vwap_distance_pct < -1.5 && ind.volume_zscore > 1.5) {
+      const baseReward = 0.6 + Math.random() * 1.0;
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "VWAP_REVERSION",
         action: 1, // BUY
-        reward: (Math.random() * 2 - 0.5) * regimeQuality,
+        reward: baseReward * regimeQuality,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
         entry_quality: regimeQuality * 0.8,
@@ -259,14 +280,15 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
         fees: 0.1,
         slippage: 0.05,
       });
-    } else if (regime !== "CHOPPY" && ind.vwap_distance_pct > 1.5 && ind.volume_zscore > 1.5) {
+    } else if (!shouldAvoidTrading && ind.vwap_distance_pct > 1.5 && ind.volume_zscore > 1.5) {
+      const baseReward = 0.6 + Math.random() * 1.0;
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "VWAP_REVERSION",
         action: -1, // SELL
-        reward: (Math.random() * 2 - 0.5) * regimeQuality,
+        reward: baseReward * regimeQuality,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
         entry_quality: regimeQuality * 0.8,
@@ -275,32 +297,53 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
         fees: 0.1,
         slippage: 0.05,
       });
+    } else if (shouldAvoidTrading && (ind.vwap_distance_pct < -1.5 || ind.vwap_distance_pct > 1.5) && ind.volume_zscore > 1.5) {
+      // Bad VWAP trade in choppy conditions: negative reward
+      trajectories.push({
+        symbol,
+        timeframe: "5m",
+        timestamp: ind.timestamp,
+        tactic_id: "VWAP_REVERSION",
+        action: ind.vwap_distance_pct < 0 ? 1 : -1,
+        reward: -0.4 - Math.random() * 0.6,
+        obs_features: { frame_stack: frameStack, current: ind },
+        regime_tag: regime,
+        entry_quality: 0.2,
+        rr_ratio: 0.5,
+        delta_equity: -Math.random() * 60,
+        fees: 0.1,
+        slippage: 0.1,
+      });
     }
     
     // Strategy 3: TREND_PULLBACK (10% weight) - only in strong trends
     if (regime.includes("STRONG_TREND") && ind.ema_20 > ind.ema_50 && ind.rsi_14 < 45) {
+      const baseReward = 1.0 + Math.random() * 1.5;
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "TREND_PULLBACK",
         action: 1, // BUY
-        reward: (Math.random() * 1.5 - 0.3) * regimeQuality,
+        reward: baseReward, // Best strategy, highest rewards
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
-        entry_quality: regimeQuality * 0.75,
+        entry_quality: 0.9,
         rr_ratio: 2.5,
-        delta_equity: Math.random() * 120 * regimeQuality,
+        delta_equity: Math.random() * 150,
         fees: 0.1,
         slippage: 0.05,
       });
     }
     
     // HOLD actions - much more frequent in bad conditions (CRITICAL for learning to stay out)
-    const holdProbability = shouldAvoidTrading ? 0.7 : 0.2; // 70% HOLD in choppy/volatile, 20% otherwise
+    const holdProbability = shouldAvoidTrading ? 0.6 : 0.15; // 60% HOLD in choppy/volatile, 15% otherwise
     if (Math.random() < holdProbability) {
-      // Reward HOLD in bad conditions, penalize in good conditions
-      const holdReward = shouldAvoidTrading ? 0.1 : -0.05; // Positive reward for staying out in bad conditions
+      // HOLD reward structure:
+      // - In BAD conditions: +0.2 (better than losing money on bad trades at -0.3 to -0.8)
+      // - In GOOD conditions: -0.1 (worse than winning trades at +0.6 to +2.5)
+      // This teaches: trade in good conditions (earn +0.6 to +2.5), stay out in bad (earn +0.2 vs lose -0.3 to -0.8)
+      const holdReward = shouldAvoidTrading ? 0.2 : -0.1;
       trajectories.push({
         symbol,
         timeframe: "5m",
@@ -310,7 +353,7 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
         reward: holdReward,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
-        entry_quality: shouldAvoidTrading ? 0.8 : 0.3, // High quality to HOLD in bad conditions
+        entry_quality: shouldAvoidTrading ? 0.85 : 0.2,
         rr_ratio: 1.0,
         delta_equity: 0,
         fees: 0,

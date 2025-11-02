@@ -365,22 +365,40 @@ export default function Training() {
                 
                 <div>
                   <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">4.</span> Stay-Out Logic (CRITICAL)
+                    <span className="text-primary">4.</span> Balanced Reward Structure (CRITICAL)
                   </h5>
+                  <p className="text-xs text-muted-foreground ml-5 mb-2">
+                    <strong>Good conditions (TREND regimes):</strong><br/>
+                    • Trading: <span className="text-green-500">+0.6 to +2.5</span> rewards (profitable)<br/>
+                    • HOLDing: <span className="text-red-400">-0.1</span> (slight penalty, encourages action)<br/>
+                    → Bot learns: <strong>TRADE and earn money</strong>
+                  </p>
                   <p className="text-xs text-muted-foreground ml-5">
-                    <strong>70% HOLD probability</strong> in CHOPPY/HIGH_VOL/SIDEWAYS vs 20% in good conditions. 
-                    HOLD gets <strong>+0.1 reward</strong> in bad regimes (teaches bot to stay out), -0.05 in good regimes. 
-                    Entry quality: 0.8 for HOLD in bad conditions vs 0.3 in good conditions.
+                    <strong>Bad conditions (CHOPPY/HIGH_VOL/SIDEWAYS):</strong><br/>
+                    • Trading: <span className="text-red-400">-0.3 to -1.0</span> (losses from whipsaws)<br/>
+                    • HOLDing: <span className="text-green-500">+0.2</span> (reward for staying out)<br/>
+                    → Bot learns: <strong>STAY OUT and preserve capital</strong>
                   </p>
                 </div>
                 
                 <div>
                   <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">5.</span> Quality & Reward Scaling
+                    <span className="text-primary">5.</span> Stay-Out Learning
                   </h5>
                   <p className="text-xs text-muted-foreground ml-5">
-                    All rewards and equity changes scale by regime quality (0.2-0.9). Strong trends = high rewards, 
-                    choppy markets = low/negative rewards. Teaches bot to recognize and avoid unfavorable conditions.
+                    <strong>60% HOLD probability</strong> in CHOPPY/HIGH_VOL/SIDEWAYS vs 15% in good conditions. 
+                    Entry quality: 0.85 for HOLD in bad conditions vs 0.2 in good conditions. Teaches bot to recognize 
+                    when markets are untradeable.
+                  </p>
+                </div>
+                
+                <div>
+                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
+                    <span className="text-primary">6.</span> Quality & Risk Scaling
+                  </h5>
+                  <p className="text-xs text-muted-foreground ml-5">
+                    Entry quality, R:R ratios, and equity changes scale by regime. Strong trends get 0.9 quality with 2.5 R:R. 
+                    Choppy markets get 0.2 quality with 0.5 R:R. Bad trades also include higher slippage (0.08-0.1 vs 0.05).
                   </p>
                 </div>
                 
