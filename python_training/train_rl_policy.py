@@ -302,7 +302,7 @@ def train_bc(
 # ============================================================================
 
 class TradingEnv(gym.Env):
-    """Gym environment for trading"""
+    """Gym environment for trading with proper metrics tracking"""
     
     def __init__(self, trajectories: List[Dict], config: TrainingConfig):
         super().__init__()
@@ -311,37 +311,138 @@ class TradingEnv(gym.Env):
         self.trajectories = trajectories
         self.current_idx = 0
         
+        # Episode tracking
+        self.episode_trades = []
+        self.episode_actions = []
+        self.episode_returns = []
+        self.equity_curve = []
+        self.initial_equity = 100000.0
+        self.current_equity = self.initial_equity
+        
         # Action space: {0: SELL, 1: HOLD, 2: BUY}
         self.action_space = spaces.Discrete(3)
         
         # Observation space: flattened frame stack
         obs_dim = config.frame_stack_size * 6  # 6 features per bar
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
+        
+        self.steps_in_episode = 0
+        self.max_episode_steps = 100
     
     def reset(self, seed=None, options=None):
         if seed is not None:
             np.random.seed(seed)
+        
+        # Reset episode tracking
+        episode_info = self._get_episode_info()
+        
+        self.episode_trades = []
+        self.episode_actions = []
+        self.episode_returns = []
+        self.equity_curve = [self.initial_equity]
+        self.current_equity = self.initial_equity
+        self.steps_in_episode = 0
+        
         self.current_idx = np.random.randint(0, len(self.trajectories))
-        return self._get_obs(), {}
+        return self._get_obs(), episode_info
     
     def step(self, action: int):
-        # Convert action from {0,1,2} to {-1,0,1}
-        action_mapped = action - 1
+        # Track action
+        self.episode_actions.append(action)
         
         traj = self.trajectories[self.current_idx]
+        expert_action = traj['action']  # {-1: sell, 0: hold, 1: buy}
         reward = traj['reward']
         
         # Normalize reward by ATR
         obs_features = traj['obs_features']
         atr = obs_features['current'].get('atr_14', 1.0)
-        normalized_reward = np.clip(reward / atr, *self.config.reward_clip)
+        normalized_reward = np.clip(reward / max(atr, 0.01), *self.config.reward_clip)
+        
+        # Track returns and equity
+        self.episode_returns.append(normalized_reward)
+        pnl = reward * 0.01 * self.current_equity  # Convert to dollar P&L
+        self.current_equity += pnl
+        self.equity_curve.append(self.current_equity)
+        
+        # Track trade if action is BUY or SELL
+        if action != 1:  # Not HOLD
+            trade = {
+                'action': action,
+                'reward': reward,
+                'pnl': pnl,
+                'correct': (action - 1) == expert_action  # Convert action space
+            }
+            self.episode_trades.append(trade)
         
         # Move to next trajectory
         self.current_idx = (self.current_idx + 1) % len(self.trajectories)
-        terminated = False  # Continuous environment
+        self.steps_in_episode += 1
+        
+        # Episode ends after max_episode_steps
+        terminated = self.steps_in_episode >= self.max_episode_steps
         truncated = False
         
-        return self._get_obs(), normalized_reward, terminated, truncated, {}
+        info = {}
+        if terminated:
+            info['episode'] = self._get_episode_info()
+        
+        return self._get_obs(), normalized_reward, terminated, truncated, info
+    
+    def _get_episode_info(self) -> Dict:
+        """Calculate episode statistics"""
+        if len(self.episode_returns) == 0:
+            return {
+                'r': 0.0,
+                'l': self.steps_in_episode,
+                'trades': 0,
+                'win_rate': 0.0,
+                'sharpe': 0.0,
+                'profit_factor': 0.0,
+                'max_dd': 0.0,
+                'action_dist': [0, 0, 0]
+            }
+        
+        # Calculate metrics
+        total_return = sum(self.episode_returns)
+        
+        # Trading performance
+        winning_trades = sum(1 for t in self.episode_trades if t['pnl'] > 0)
+        total_trades = len(self.episode_trades)
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        
+        # Profit factor
+        gross_profit = sum(t['pnl'] for t in self.episode_trades if t['pnl'] > 0)
+        gross_loss = abs(sum(t['pnl'] for t in self.episode_trades if t['pnl'] < 0))
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
+        
+        # Sharpe ratio
+        returns = np.array(self.episode_returns)
+        sharpe = (np.mean(returns) / (np.std(returns) + 1e-6)) * np.sqrt(252) if len(returns) > 1 else 0
+        
+        # Max drawdown
+        equity = np.array(self.equity_curve)
+        running_max = np.maximum.accumulate(equity)
+        drawdown = (running_max - equity) / running_max * 100
+        max_dd = np.max(drawdown) if len(drawdown) > 0 else 0
+        
+        # Action distribution
+        action_counts = [
+            sum(1 for a in self.episode_actions if a == 0),  # SELL
+            sum(1 for a in self.episode_actions if a == 1),  # HOLD
+            sum(1 for a in self.episode_actions if a == 2),  # BUY
+        ]
+        
+        return {
+            'r': float(total_return),
+            'l': self.steps_in_episode,
+            'trades': total_trades,
+            'win_rate': float(win_rate),
+            'sharpe': float(sharpe),
+            'profit_factor': float(profit_factor),
+            'max_dd': float(max_dd),
+            'action_dist': action_counts
+        }
     
     def _get_obs(self) -> np.ndarray:
         traj = self.trajectories[self.current_idx]
@@ -370,80 +471,102 @@ class TradingEnv(gym.Env):
 # ============================================================================
 
 class MetricsCallback(BaseCallback):
-    """Callback to log metrics during PPO training"""
+    """Callback to log comprehensive metrics during PPO training"""
     
     def __init__(self, client: Client, run_id: str, verbose: int = 0):
         super().__init__(verbose)
         self.client = client
         self.run_id = run_id
-        self.episode_rewards = []
-        self.episode_returns = []
+        
+        # Collect episode info from completed episodes
+        self.episode_infos = []
+        self.step_count = 0
+        self.last_log_step = 0
+        self.log_interval = 2048  # Log every rollout (PPO default)
     
     def _on_step(self) -> bool:
-        # Collect episode rewards from all environments
-        if "rewards" in self.locals and self.locals["rewards"] is not None:
-            rewards = self.locals["rewards"]
-            if isinstance(rewards, np.ndarray):
-                for reward in rewards.flatten():
-                    if not np.isnan(reward):
-                        self.episode_returns.append(float(reward))
+        self.step_count += 1
         
-        # Also collect from infos (episode completions)
+        # Collect episode completion info
         if "infos" in self.locals:
             for info in self.locals["infos"]:
                 if isinstance(info, dict) and "episode" in info:
-                    ep_reward = info["episode"].get("r", 0)
-                    self.episode_rewards.append(float(ep_reward))
+                    self.episode_infos.append(info["episode"])
         
         return True
     
     def _on_rollout_end(self) -> None:
-        # Calculate trading metrics
-        recent_returns = self.episode_returns[-500:] if len(self.episode_returns) > 500 else self.episode_returns
+        """Log comprehensive metrics after each rollout"""
         
-        if len(recent_returns) == 0:
+        if len(self.episode_infos) == 0:
             return
         
-        mean_reward = np.mean(recent_returns)
+        # Aggregate episode statistics
+        mean_reward = np.mean([ep['r'] for ep in self.episode_infos])
+        mean_length = np.mean([ep['l'] for ep in self.episode_infos])
         
-        # Win rate: % of positive returns
-        winning_trades = sum(1 for r in recent_returns if r > 0)
-        win_rate = (winning_trades / len(recent_returns)) * 100 if recent_returns else 0
+        # Trading metrics
+        total_trades = sum(ep.get('trades', 0) for ep in self.episode_infos)
+        win_rates = [ep.get('win_rate', 0) for ep in self.episode_infos]
+        mean_win_rate = np.mean(win_rates) if win_rates else 0
         
-        # Sharpe ratio (assuming daily returns)
-        std_reward = np.std(recent_returns) if len(recent_returns) > 1 else 1e-6
-        sharpe_ratio = (mean_reward / std_reward) * np.sqrt(252) if std_reward > 0 else 0
+        sharpe_ratios = [ep.get('sharpe', 0) for ep in self.episode_infos if not np.isnan(ep.get('sharpe', 0))]
+        mean_sharpe = np.mean(sharpe_ratios) if sharpe_ratios else 0
         
-        # Profit factor
-        gross_profit = sum(r for r in recent_returns if r > 0)
-        gross_loss = abs(sum(r for r in recent_returns if r < 0))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+        profit_factors = [ep.get('profit_factor', 0) for ep in self.episode_infos if not np.isnan(ep.get('profit_factor', 0))]
+        mean_profit_factor = np.mean(profit_factors) if profit_factors else 0
         
-        # Max drawdown
-        cumulative = np.cumsum(recent_returns)
-        running_max = np.maximum.accumulate(cumulative)
-        drawdown = running_max - cumulative
-        max_drawdown = np.max(drawdown) if len(drawdown) > 0 else 0
+        max_drawdowns = [ep.get('max_dd', 0) for ep in self.episode_infos]
+        mean_max_dd = np.mean(max_drawdowns) if max_drawdowns else 0
+        
+        # Action distribution (aggregate across all episodes)
+        total_actions = [0, 0, 0]
+        for ep in self.episode_infos:
+            action_dist = ep.get('action_dist', [0, 0, 0])
+            for i in range(3):
+                total_actions[i] += action_dist[i]
+        
+        total_action_count = sum(total_actions)
+        action_pcts = [a / total_action_count * 100 if total_action_count > 0 else 0 for a in total_actions]
+        
+        # Get PPO training metrics from logger
+        policy_loss = self.model.logger.name_to_value.get("train/policy_loss", 0)
+        value_loss = self.model.logger.name_to_value.get("train/value_loss", 0)
+        entropy = self.model.logger.name_to_value.get("train/entropy", 0)
+        
+        # Calculate epoch number
+        epoch = self.step_count // self.log_interval
         
         metrics = {
             "run_id": self.run_id,
-            "epoch": self.num_timesteps // 2048,
+            "epoch": int(epoch),
             "split": "train",
             "mean_reward": float(mean_reward),
-            "win_rate": float(win_rate),
-            "sharpe_ratio": float(sharpe_ratio),
-            "profit_factor": float(profit_factor),
-            "max_drawdown": float(max_drawdown),
-            "policy_loss": float(self.model.logger.name_to_value.get("train/policy_loss", 0)),
-            "value_loss": float(self.model.logger.name_to_value.get("train/value_loss", 0)),
-            "entropy": float(self.model.logger.name_to_value.get("train/entropy", 0)),
+            "win_rate": float(mean_win_rate),
+            "sharpe_ratio": float(mean_sharpe),
+            "profit_factor": float(mean_profit_factor),
+            "max_drawdown": float(mean_max_dd),
+            "policy_loss": float(policy_loss),
+            "value_loss": float(value_loss),
+            "entropy": float(entropy),
+            "action_sell_pct": float(action_pcts[0]),
+            "action_hold_pct": float(action_pcts[1]),
+            "action_buy_pct": float(action_pcts[2]),
         }
         
         try:
             self.client.table("training_metrics").insert(metrics).execute()
-            logger.info(f"Epoch {metrics['epoch']}: reward={mean_reward:.3f}, win_rate={win_rate:.1f}%, sharpe={sharpe_ratio:.2f}")
+            logger.info(
+                f"Epoch {epoch}: reward={mean_reward:.3f}, win_rate={mean_win_rate:.1f}%, "
+                f"sharpe={mean_sharpe:.2f}, pf={mean_profit_factor:.2f}, "
+                f"trades={total_trades}"
+            )
         except Exception as e:
             logger.error(f"Failed to log metrics: {e}")
+        
+        # Clear collected episodes
+        self.episode_infos = []
+        self.last_log_step = self.step_count
 
 
 def train_ppo(
