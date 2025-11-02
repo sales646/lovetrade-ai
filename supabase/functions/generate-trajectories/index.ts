@@ -32,19 +32,19 @@ class VWAPReversionStrategy extends ExpertStrategy {
       return { action: 0, entry_quality: 0, reason: "Insufficient data" };
     }
 
-    const k = 1.5; // ATR multiplier
+    const k = 1.0; // Reduced ATR multiplier (was 1.5)
     const atr_pct = (atr_14 / close) * 100;
     const threshold = k * atr_pct;
 
-    // Long when price <= VWAP - k*ATR and RSI < 40 (oversold)
-    if (vwap_distance_pct <= -threshold && rsi_14 < 40) {
-      const quality = Math.min(1, Math.abs(vwap_distance_pct) / (threshold * 2));
+    // Long when price <= VWAP - k*ATR and RSI < 50 (relaxed from 40)
+    if (vwap_distance_pct <= -threshold && rsi_14 < 50) {
+      const quality = Math.min(1, Math.abs(vwap_distance_pct) / (threshold * 2)) * 0.6 + 0.2;
       return { action: 1, entry_quality: quality, reason: "Oversold below VWAP" };
     }
 
-    // Short when price >= VWAP + k*ATR and RSI > 60 (overbought)
-    if (vwap_distance_pct >= threshold && rsi_14 > 60) {
-      const quality = Math.min(1, vwap_distance_pct / (threshold * 2));
+    // Short when price >= VWAP + k*ATR and RSI > 50 (relaxed from 60)
+    if (vwap_distance_pct >= threshold && rsi_14 > 50) {
+      const quality = Math.min(1, vwap_distance_pct / (threshold * 2)) * 0.6 + 0.2;
       return { action: -1, entry_quality: quality, reason: "Overbought above VWAP" };
     }
 
@@ -353,7 +353,37 @@ class OpeningRangeBreakoutStrategy extends ExpertStrategy {
   }
 }
 
+// Simple baseline strategy with relaxed conditions
+class SimpleRSIEMAStrategy extends ExpertStrategy {
+  constructor() {
+    super("SIMPLE_RSI_EMA");
+  }
+
+  override evaluate(features: any, newsFeatures: any[] = [], previousFeatures: any[] = []): { action: number; entry_quality: number; reason: string } {
+    const { rsi_14, close, ema_20, ema_50 } = features;
+    
+    if (!rsi_14 || !ema_20 || !ema_50) {
+      return { action: 0, entry_quality: 0, reason: "Missing data" };
+    }
+
+    // Buy: RSI < 45 AND price below EMA20
+    if (rsi_14 < 45 && close < ema_20) {
+      const quality = 0.3 + (45 - rsi_14) / 100; // Quality 0.3-0.75
+      return { action: 1, entry_quality: quality, reason: "RSI oversold + below EMA" };
+    }
+
+    // Sell: RSI > 55 AND price above EMA20  
+    if (rsi_14 > 55 && close > ema_20) {
+      const quality = 0.3 + (rsi_14 - 55) / 100; // Quality 0.3-0.75
+      return { action: -1, entry_quality: quality, reason: "RSI overbought + above EMA" };
+    }
+
+    return { action: 0, entry_quality: 0, reason: "No setup" };
+  }
+}
+
 const STRATEGIES = [
+  new SimpleRSIEMAStrategy(), // Simple baseline strategy first
   new VWAPReversionStrategy(),
   new NewsMomentumStrategy(),
   new TrendPullbackStrategy(),
@@ -415,6 +445,19 @@ serve(async (req) => {
       .select("*")
       .eq("symbol", symbol)
       .order("timestamp", { ascending: false });
+
+    // Log sample indicator values for debugging
+    if (indicators && indicators.length > 0) {
+      const sample = indicators[Math.floor(indicators.length / 2)];
+      console.log(`Sample indicators for ${symbol}:`, {
+        rsi_14: sample.rsi_14,
+        vwap_distance_pct: sample.vwap_distance_pct,
+        volume_zscore: sample.volume_zscore,
+        close: sample.close,
+        ema_20: sample.ema_20,
+        ema_50: sample.ema_50,
+      });
+    }
 
     const trajectories = [];
     const fees_per_trade = 1.0; // $1 per trade
@@ -503,13 +546,19 @@ serve(async (req) => {
       for (const strategy of STRATEGIES) {
         const result = strategy.evaluate(features, relevantNews, previousFeatures);
         
-        if (result.action !== 0 && result.entry_quality > 0.3) {
+        // Lowered quality threshold from 0.3 to 0.2 for more signals
+        if (result.action !== 0 && result.entry_quality > 0.2) {
           strategySignals.push({
             strategy: strategy.name,
             action: result.action,
             quality: result.entry_quality,
             reason: result.reason,
           });
+          
+          // Log first few signals for debugging
+          if (trajectories.length < 5) {
+            console.log(`Signal: ${strategy.name} - ${result.reason}, Action: ${result.action}, Quality: ${result.entry_quality.toFixed(2)}`);
+          }
         }
       }
 
@@ -615,6 +664,16 @@ serve(async (req) => {
 
     // Store trajectories
     if (trajectories.length > 0) {
+      // Log action distribution before storing
+      const actionCounts = { buy: 0, sell: 0, hold: 0 };
+      trajectories.forEach(t => {
+        if (t.action === 1) actionCounts.buy++;
+        else if (t.action === -1) actionCounts.sell++;
+        else actionCounts.hold++;
+      });
+      
+      console.log(`Action distribution for ${symbol}: BUY=${actionCounts.buy}, SELL=${actionCounts.sell}, HOLD=${actionCounts.hold}`);
+      
       const { error: insertError } = await supabaseAdmin
         .from("expert_trajectories")
         .insert(trajectories);
