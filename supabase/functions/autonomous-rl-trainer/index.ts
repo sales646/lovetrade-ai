@@ -15,7 +15,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Account capital parameters
 let ACCOUNT_EQUITY = 100000; // Default $100k, will be updated from Alpaca
-const RISK_PER_TRADE_PCT = 1.0; // 1% risk per trade
+const RISK_PER_TRADE_PCT = 15.0; // 15% risk per trade (aggressive for simulation)
 
 // Expert weights for imitation learning
 const EXPERT_WEIGHTS: Record<string, number> = {

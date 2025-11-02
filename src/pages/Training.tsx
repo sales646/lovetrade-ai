@@ -224,8 +224,8 @@ export default function Training() {
               <div className="rounded-lg border border-border bg-muted/30 p-3">
                 <div className="font-semibold mb-2">💰 Position Sizing</div>
                 <div className="space-y-1 text-muted-foreground">
-                  <div>• Risk: <span className="text-yellow-500 font-mono">1% per trade</span></div>
-                  <div>• Uses <span className="font-mono">Alpaca balance</span></div>
+                  <div>• Risk: <span className="text-yellow-500 font-mono">15% per trade</span></div>
+                  <div>• Uses <span className="font-mono">full buying power</span></div>
                   <div>• Shares = Risk$ / StopDistance</div>
                   <div>• Rewards scaled by <span className="font-mono">$P&L</span></div>
                 </div>
