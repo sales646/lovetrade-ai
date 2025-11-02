@@ -5,8 +5,9 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { Brain, Zap, TrendingUp, Activity, Cpu, Target, Play, Pause } from "lucide-react";
+import { Brain, Zap, TrendingUp, Activity, Cpu, Target, Play, Pause, Database, RefreshCw } from "lucide-react";
 import { useStartAutonomousTraining, useRLMetrics, useQState } from "@/lib/api/autonomous-training";
+import { useGenerateTrainingData } from "@/lib/api/data-generation";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { toast } from "sonner";
@@ -17,11 +18,19 @@ export default function Training() {
   const [autoIntervalId, setAutoIntervalId] = useState<number | null>(null);
   
   const startTraining = useStartAutonomousTraining();
+  const generateData = useGenerateTrainingData();
   const { data: metrics } = useRLMetrics();
   const { data: qState } = useQState();
 
   const handleStartTraining = () => {
     startTraining.mutate(iterations);
+  };
+
+  const handleGenerateData = () => {
+    generateData.mutate({
+      symbols: ["AAPL", "TSLA", "MSFT", "GOOGL", "AMZN"],
+      barsPerSymbol: 500,
+    });
   };
 
   const handleToggleAutoTraining = () => {
@@ -140,6 +149,79 @@ export default function Training() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Data Generation */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Database className="h-5 w-5 text-primary" />
+                Automatic Data Generation
+              </CardTitle>
+              <CardDescription>
+                Generate synthetic training data for both cloud and local Python training
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="font-semibold mb-1">🎲 Generate Training Data</h4>
+                  <p className="text-sm text-muted-foreground">
+                    Creates 500 bars + indicators + expert trajectories for 5 symbols
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Data is available for both cloud RL training and local Python scripts
+                  </p>
+                </div>
+                <Button
+                  onClick={handleGenerateData}
+                  disabled={generateData.isPending}
+                  size="lg"
+                >
+                  {generateData.isPending ? (
+                    <>
+                      <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <Database className="mr-2 h-4 w-4" />
+                      Generate Data
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border bg-muted/50 p-4">
+              <h4 className="font-semibold mb-2">What gets generated:</h4>
+              <ul className="space-y-1 text-sm text-muted-foreground">
+                <li className="flex items-start gap-2">
+                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
+                  <span><strong>Historical bars:</strong> OHLCV data (5-minute intervals)</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
+                  <span><strong>Technical indicators:</strong> RSI, ATR, VWAP, EMA, Volume z-score, etc.</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
+                  <span><strong>Expert trajectories:</strong> Weighted signals from RSI_EMA (40%), VWAP_REVERSION (30%), TREND_PULLBACK (10%)</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
+                  <span><strong>Symbols:</strong> AAPL, TSLA, MSFT, GOOGL, AMZN</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Training Control */}
       <Card>
