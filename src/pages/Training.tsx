@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Brain, Zap, TrendingUp, Activity, Cpu, Target, Play, Pause, Database, RefreshCw } from "lucide-react";
 import { useStartAutonomousTraining, useRLMetrics, useQState } from "@/lib/api/autonomous-training";
+import { useAlpacaAccount } from "@/lib/api/alpaca";
 import { useGenerateTrainingData } from "@/lib/api/data-generation";
 import { useLocalGPUTrainingStatus } from "@/lib/api/training";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from "recharts";
@@ -25,6 +26,7 @@ export default function Training() {
   const generateData = useGenerateTrainingData();
   const { data: metrics } = useRLMetrics();
   const { data: qState } = useQState();
+  const { data: alpacaAccount, isLoading: alpacaLoading, error: alpacaError } = useAlpacaAccount();
   const { data: localGPUStatus } = useLocalGPUTrainingStatus();
 
   const handleStartTraining = () => {
@@ -163,6 +165,68 @@ export default function Training() {
           )}
         </div>
       </div>
+
+      {/* Alpaca Account Info */}
+      {alpacaAccount && (
+        <Card className="border-blue-500/30 bg-blue-500/5">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Database className="h-5 w-5 text-blue-500" />
+              Alpaca Account
+            </CardTitle>
+            <CardDescription>
+              Live trading account data {alpacaError && "(Failed to fetch)"}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div>
+                <div className="text-sm text-muted-foreground mb-1">Equity</div>
+                <div className="text-2xl font-bold text-green-600">
+                  ${alpacaAccount.equity.toLocaleString()}
+                </div>
+              </div>
+              <div>
+                <div className="text-sm text-muted-foreground mb-1">Buying Power</div>
+                <div className="text-2xl font-bold text-blue-600">
+                  ${alpacaAccount.buyingPower.toLocaleString()}
+                </div>
+              </div>
+              <div>
+                <div className="text-sm text-muted-foreground mb-1">Cash</div>
+                <div className="text-2xl font-bold">
+                  ${alpacaAccount.cash.toLocaleString()}
+                </div>
+              </div>
+              <div>
+                <div className="text-sm text-muted-foreground mb-1">Status</div>
+                <div className="flex flex-col gap-1">
+                  <Badge variant={alpacaAccount.accountBlocked ? "destructive" : "default"}>
+                    {alpacaAccount.status}
+                  </Badge>
+                  {alpacaAccount.tradingBlocked && (
+                    <Badge variant="destructive" className="text-xs">Trading Blocked</Badge>
+                  )}
+                  <div className="text-xs text-muted-foreground mt-1">
+                    Day trades: {alpacaAccount.daytradeCount}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {!alpacaAccount && !alpacaLoading && (
+        <Card className="border-yellow-500/30 bg-yellow-500/5">
+          <CardContent className="pt-6">
+            <p className="text-sm text-muted-foreground">
+              ⚠️ Alpaca account not configured. Using default $100k for simulations.
+              {alpacaError && ` Error: ${alpacaError.message}`}
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {/* System Flow Visualization */}
       <Card className="border-primary/20">
