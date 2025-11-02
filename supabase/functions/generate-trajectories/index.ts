@@ -418,18 +418,20 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     );
 
-    // Fetch technical indicators
-    let query = supabaseAdmin
+    // Fetch technical indicators and join with historical bars for OHLCV data
+    const { data: indicators, error: indError } = await supabaseAdmin
       .from("technical_indicators")
-      .select("*")
+      .select(`
+        *,
+        bars:historical_bars!inner(close, open, high, low, volume)
+      `)
       .eq("symbol", symbol)
       .eq("timeframe", timeframe)
-      .order("timestamp", { ascending: true });
-
-    if (start_date) query = query.gte("timestamp", start_date);
-    if (end_date) query = query.lte("timestamp", end_date);
-
-    const { data: indicators, error: indError } = await query;
+      .eq("historical_bars.symbol", symbol)
+      .eq("historical_bars.timeframe", timeframe)
+      .order("timestamp", { ascending: true })
+      .gte("timestamp", start_date || "1970-01-01")
+      .lte("timestamp", end_date || "2100-01-01");
 
     if (indError || !indicators || indicators.length === 0) {
       console.error("Error fetching indicators:", indError);
@@ -446,9 +448,19 @@ serve(async (req) => {
       .eq("symbol", symbol)
       .order("timestamp", { ascending: false });
 
+    // Flatten the joined data
+    const flatIndicators = indicators.map(ind => ({
+      ...ind,
+      close: ind.bars[0]?.close,
+      open: ind.bars[0]?.open,
+      high: ind.bars[0]?.high,
+      low: ind.bars[0]?.low,
+      volume: ind.bars[0]?.volume,
+    }));
+
     // Log sample indicator values for debugging
-    if (indicators && indicators.length > 0) {
-      const sample = indicators[Math.floor(indicators.length / 2)];
+    if (flatIndicators && flatIndicators.length > 0) {
+      const sample = flatIndicators[Math.floor(flatIndicators.length / 2)];
       console.log(`Sample indicators for ${symbol}:`, {
         rsi_14: sample.rsi_14,
         vwap_distance_pct: sample.vwap_distance_pct,
@@ -499,12 +511,12 @@ serve(async (req) => {
     // Generate trajectories for each timestamp
     const lambda_risk = 0.2; // Risk penalty coefficient
     
-    for (let i = FRAME_STACK_SIZE; i < indicators.length; i++) {
-      const features = indicators[i];
+    for (let i = FRAME_STACK_SIZE; i < flatIndicators.length; i++) {
+      const features = flatIndicators[i];
       const timestamp = new Date(features.timestamp);
       
       // Get frame stack (last 32 bars including current)
-      const frameStack = indicators.slice(i - FRAME_STACK_SIZE, i + 1);
+      const frameStack = flatIndicators.slice(i - FRAME_STACK_SIZE, i + 1);
       
       // Get relevant news (within 2 hours before this timestamp)
       const relevantNews = newsData?.filter(n => {
@@ -514,7 +526,7 @@ serve(async (req) => {
       }) || [];
 
       // Get previous features for strategies that need history
-      const previousFeatures = indicators.slice(Math.max(0, i - 10), i);
+      const previousFeatures = flatIndicators.slice(Math.max(0, i - 10), i);
       
       // Detect regime
       const regime = detectRegime(features, previousFeatures);
