@@ -32,65 +32,82 @@ async function isTrainingActive(): Promise<boolean> {
   return data?.is_active || false;
 }
 
-// Run single training iteration (called by cron)
-async function runTrainingIteration() {
-  await log("INFO", "🚀 Starting scheduled training iteration");
+// Run continuous training loop
+async function runContinuousTraining() {
+  await log("INFO", "🚀 Starting autonomous training loop");
   
-  try {
-    // Check if training is active
-    const active = await isTrainingActive();
-    
-    if (!active) {
-      await log("INFO", "Training disabled in config, skipping iteration");
-      return { success: true, message: "Training disabled" };
-    }
-    
-    // 1. Generate data (smaller batch for faster iterations)
-    await log("INFO", "📊 Generating training data from Yahoo Finance...");
-    const dataResponse = await supabase.functions.invoke("auto-data-generator", {
-      body: {
-        symbols: ["AAPL", "TSLA", "NVDA"],
-        barsPerSymbol: 500,
-        useRealData: true,
+  let isRunning = true;
+  let loopCount = 0;
+  
+  // Listen for shutdown signals
+  const shutdownHandler = () => {
+    isRunning = false;
+    log("INFO", "Shutdown signal received, stopping training loop");
+  };
+  
+  addEventListener('beforeunload', shutdownHandler);
+  
+  while (isRunning) {
+    try {
+      // Check if training is still active
+      const active = await isTrainingActive();
+      
+      if (!active) {
+        await log("INFO", "Training disabled in config, pausing loop");
+        await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10s before checking again
+        continue;
       }
-    });
-    
-    if (dataResponse.error) {
-      await log("ERROR", "Data generation failed", { error: dataResponse.error });
-      throw new Error(`Data generation failed: ${dataResponse.error.message}`);
+      
+      loopCount++;
+      await log("INFO", `🔄 Training loop iteration #${loopCount}`);
+      
+      // 1. Generate data
+      await log("INFO", "📊 Generating training data from Yahoo Finance...");
+      const dataResponse = await supabase.functions.invoke("auto-data-generator", {
+        body: {
+          symbols: ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL"],
+          barsPerSymbol: 1000, // More bars for real data
+          useRealData: true, // Always use real market data
+        }
+      });
+      
+      if (dataResponse.error) {
+        await log("ERROR", "Data generation failed", { error: dataResponse.error });
+      } else {
+        await log("INFO", "✅ Data generation complete");
+      }
+      
+      // Wait 2 seconds for data to settle
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // 2. Run training
+      await log("INFO", "🧠 Starting RL training...");
+      const trainingResponse = await supabase.functions.invoke("autonomous-rl-trainer", {
+        body: { iterations: 10 }
+      });
+      
+      if (trainingResponse.error) {
+        await log("ERROR", "Training failed", { error: trainingResponse.error });
+      } else {
+        const result = trainingResponse.data;
+        await log("INFO", `✅ Training complete: ${result?.iterations || 0} episodes, avg reward: ${result?.avgReward?.toFixed(2) || 'N/A'}`, result);
+      }
+      
+      // Wait 30 seconds before next iteration
+      await log("INFO", `⏳ Waiting 30 seconds before next iteration...`);
+      await new Promise(resolve => setTimeout(resolve, 30000));
+      
+    } catch (error) {
+      await log("ERROR", "Training loop error", { 
+        error: error instanceof Error ? error.message : String(error) 
+      });
+      
+      // Wait 60 seconds on error before retrying
+      await new Promise(resolve => setTimeout(resolve, 60000));
     }
-    
-    await log("INFO", "✅ Data generation complete");
-    
-    // Wait 2 seconds for data to settle
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // 2. Run training (smaller batch for faster iterations)
-    await log("INFO", "🧠 Starting RL training...");
-    const trainingResponse = await supabase.functions.invoke("autonomous-rl-trainer", {
-      body: { iterations: 3 }
-    });
-    
-    if (trainingResponse.error) {
-      await log("ERROR", "Training failed", { error: trainingResponse.error });
-      throw new Error(`Training failed: ${trainingResponse.error.message}`);
-    }
-    
-    const result = trainingResponse.data;
-    await log("INFO", `✅ Training complete: ${result?.iterations || 0} episodes, avg reward: ${result?.avgReward?.toFixed(2) || 'N/A'}`, result);
-    
-    return { 
-      success: true, 
-      message: "Training iteration completed successfully",
-      result 
-    };
-    
-  } catch (error) {
-    await log("ERROR", "Training iteration error", { 
-      error: error instanceof Error ? error.message : String(error) 
-    });
-    throw error;
   }
+  
+  await log("INFO", "Training loop stopped");
 }
 
 serve(async (req) => {
@@ -99,12 +116,30 @@ serve(async (req) => {
   }
 
   try {
-    // Run a single training iteration (called by cron job)
-    const result = await runTrainingIteration();
+    const { action } = await req.json().catch(() => ({ action: "start" }));
+    
+    if (action === "start") {
+      // Start the continuous training loop in background
+      // Use Promise to avoid blocking the response
+      runContinuousTraining().catch(error => 
+        log("ERROR", "Training loop crashed", { error: error.message })
+      );
+      
+      return new Response(
+        JSON.stringify({ 
+          success: true, 
+          message: "Autonomous training loop started" 
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
     
     return new Response(
-      JSON.stringify(result),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      JSON.stringify({ 
+        success: false, 
+        error: "Unknown action" 
+      }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
     
   } catch (error) {

@@ -127,33 +127,40 @@ export default function Training() {
     };
   }, [autoIntervalId, autoGenIntervalId]);
 
-  // Toggle master system (cron-based scheduled training)
+  // Toggle master system (backend continuous training)
   const handleToggleMasterSystem = async () => {
     const newState = !isSystemActive;
     
     if (newState) {
-      // Enable in bot_config
-      const { error } = await supabase
-        .from("bot_config")
-        .update({ is_active: true })
-        .eq("id", "00000000-0000-0000-0000-000000000000");
+      // Start the backend training loop
+      toast.loading("🚀 Starting autonomous training system...");
+      
+      const { error } = await supabase.functions.invoke("autonomous-training-loop", {
+        body: { action: "start" }
+      });
       
       if (error) {
-        toast.error("Failed to activate training system");
+        toast.error("Failed to start training system");
         console.error(error);
         return;
       }
       
-      toast.success("🎯 Autonomous training activated! Runs automatically every minute with smaller batches.");
+      // Enable in bot_config
+      await supabase
+        .from("bot_config")
+        .update({ is_active: true })
+        .eq("id", "00000000-0000-0000-0000-000000000000");
+      
+      toast.success("🎯 Autonomous training system activated! It will continue running even if you leave this page.");
       setIsSystemActive(true);
     } else {
-      // Disable in bot_config (cron job will skip when inactive)
+      // Disable in bot_config (the loop will stop itself)
       await supabase
         .from("bot_config")
         .update({ is_active: false })
         .eq("id", "00000000-0000-0000-0000-000000000000");
       
-      toast.info("🛑 Training system deactivated");
+      toast.info("🛑 Training system will stop after current iteration");
       setIsSystemActive(false);
     }
   };

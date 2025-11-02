@@ -13,14 +13,9 @@ const corsHeaders = {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-// Account capital parameters (Daytrading with $403k BP)
-let ACCOUNT_EQUITY = 403000; // Default $403k buying power, will be updated from Alpaca
-const RISK_PER_TRADE_PCT = 0.35; // 0.35% risk per trade (0.25-0.5% range)
-const POSITION_SIZE_PCT_MIN = 5.0; // Min 5% of BP per position (~$20k)
-const POSITION_SIZE_PCT_MAX = 10.0; // Max 10% of BP per position (~$40k)
-const MAX_CONCURRENT_POSITIONS = 5; // Max 3-6 concurrent positions
-const MAX_EXPOSURE_PCT = 60.0; // Max 60% of BP exposed at once
-const ATR_STOP_MULTIPLIER = 1.25; // 1.0-1.5x ATR for stops
+// Account capital parameters
+let ACCOUNT_EQUITY = 100000; // Default $100k, will be updated from Alpaca
+const RISK_PER_TRADE_PCT = 100.0; // 100% - use full buying power in simulation
 
 // Expert weights for imitation learning
 const EXPERT_WEIGHTS: Record<string, number> = {
@@ -187,7 +182,7 @@ function selectAction(stateKey: string, qState: QState): number {
   }
 }
 
-// Calculate position size based on daytrading risk parameters
+// Calculate position size based on account equity, risk, and confidence
 function calculatePositionSize(
   entryPrice: number, 
   stopDistance: number,
@@ -199,22 +194,22 @@ function calculatePositionSize(
   const minQ = Math.min(...qValues);
   const selectedQ = qValues[actionIdx];
   
-  // Confidence factor: 0.5 (low confidence) to 1.0 (high confidence)
+  // Confidence factor: 0.1 (low confidence) to 1.0 (high confidence)
+  // If Q-values are similar, confidence is low. If big spread and we picked max, high confidence.
   const qSpread = maxQ - minQ;
   const qAdvantage = qSpread > 0 ? (selectedQ - minQ) / qSpread : 0.5;
-  const confidenceFactor = Math.max(0.5, Math.min(1.0, 0.5 + qAdvantage * 0.5));
   
-  // Daytrading position sizing: 5-10% of BP based on confidence
-  const positionPct = POSITION_SIZE_PCT_MIN + (POSITION_SIZE_PCT_MAX - POSITION_SIZE_PCT_MIN) * confidenceFactor;
-  const targetDollarSize = ACCOUNT_EQUITY * (positionPct / 100);
+  // Base confidence on Q-advantage: 0.1 minimum, 1.0 maximum
+  const confidenceFactor = Math.max(0.1, Math.min(1.0, qAdvantage));
   
-  // Also respect risk limit: max loss should be 0.25-0.5% of equity
+  // Base risk amount (use full buying power as max)
   const maxRiskDollars = ACCOUNT_EQUITY * (RISK_PER_TRADE_PCT / 100);
-  const maxSharesFromRisk = Math.floor(maxRiskDollars / stopDistance);
   
-  // Take the smaller of the two constraints
-  const maxSharesFromSize = Math.floor(targetDollarSize / entryPrice);
-  const shares = Math.min(maxSharesFromRisk, maxSharesFromSize);
+  // Scale risk by confidence
+  const adjustedRiskDollars = maxRiskDollars * confidenceFactor;
+  
+  // Shares = Risk$ / StopDistance
+  const shares = Math.floor(adjustedRiskDollars / stopDistance);
   const dollarSize = shares * entryPrice;
   
   return { shares, dollarSize, confidenceFactor };
@@ -233,11 +228,11 @@ function simulateTradeOutcome(
   const entryBar = bars[entryIndex];
   const entryPrice = Number(entryBar.close);
   
-  // Daytrading risk management parameters
-  const stopLossDistance = atr * ATR_STOP_MULTIPLIER; // 1.25x ATR stop
-  const takeProfitPct = 2.5; // 2.5% profit target for daytrading
-  const slippagePct = 0.08; // 0.08% slippage
-  const feesPct = 0.10; // 0.10% fees (roundtrip)
+  // REALISTIC risk management parameters
+  const stopLossDistance = atr * 2.0; // Tighter 2.0x ATR stop (was 1.5x)
+  const takeProfitPct = 3.0; // Smaller 3.0% target (was 3.5%)
+  const slippagePct = 0.12; // Higher slippage (was 0.08%)
+  const feesPct = 0.15; // Higher fees (was 0.12%)
   
   const stopLossPrice = side === "BUY" 
     ? entryPrice - stopLossDistance 
@@ -402,23 +397,12 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       lossTotal: 0,
       actionCounts: { buy: 0, sell: 0, hold: 0 },
       expertAccuracies: {},
-      startEquity: ACCOUNT_EQUITY,
-      endEquity: ACCOUNT_EQUITY,
-      episodePnlUsd: 0,
-      episodeReturnPct: 0,
-      nTrades: 0,
-      avgPositionNotional: 0,
-      maxConcurrentPositions: 0,
-      avgLeverage: 0,
     };
   }
   
   // Load expert trajectories for imitation
   const expertTrajectories = await loadExpertTrajectories(symbol, 50);
   
-  // Episode tracking
-  const startEquity = ACCOUNT_EQUITY;
-  let currentEquity = ACCOUNT_EQUITY;
   let totalReward = 0;
   let steps = 0;
   let lossRL = 0;
@@ -430,9 +414,6 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
   let totalReturnPct = 0;
   let totalDollarPnl = 0;
   let totalConfidence = 0;
-  let totalPositionNotional = 0;
-  let currentOpenPositions = 0;
-  let maxConcurrentPositions = 0;
   
   // Simulate through historical bars with REAL trade outcomes
   for (let i = 0; i < bars.length - 15; i++) { // Leave room for trade to complete
@@ -467,119 +448,81 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
     // Track action distribution
     if (actionIdx === 0) {
       actionCounts.sell++;
+      // SELL trade: simulate short position
+      const tradeResult = simulateTradeOutcome(
+        bars,
+        i,
+        "SELL",
+        Number(indicators.atr_14),
+        qState.q_table[stateKey],
+        actionIdx,
+        12 // max hold bars
+      );
+      reward = tradeResult.reward;
+      totalReward += reward;
+      totalTrades++;
+      totalReturnPct += tradeResult.pnl_pct;
+      totalDollarPnl += tradeResult.pnl_dollars;
+      totalConfidence += tradeResult.confidence_factor;
+      if (reward > 0) winningTrades++;
       
-      // Check position limits before trading
-      if (currentOpenPositions >= MAX_CONCURRENT_POSITIONS) {
-        // Skip trade - too many open positions
-        reward = -0.05; // Small penalty for trying to overtrade
-        totalReward += reward;
-      } else {
-        // SELL trade: simulate short position
-        currentOpenPositions++;
-        maxConcurrentPositions = Math.max(maxConcurrentPositions, currentOpenPositions);
-        
-        const tradeResult = simulateTradeOutcome(
-          bars,
-          i,
-          "SELL",
-          Number(indicators.atr_14),
-          qState.q_table[stateKey],
-          actionIdx,
-          12 // max hold bars
-        );
-        
-        // Update equity and metrics
-        currentEquity += tradeResult.pnl_dollars;
-        ACCOUNT_EQUITY = currentEquity; // Update for next position sizing
-        
-        reward = tradeResult.reward;
-        totalReward += reward;
-        totalTrades++;
-        totalReturnPct += tradeResult.pnl_pct;
-        totalDollarPnl += tradeResult.pnl_dollars;
-        totalConfidence += tradeResult.confidence_factor;
-        totalPositionNotional += tradeResult.position_size;
-        if (tradeResult.pnl_dollars > 0) winningTrades++;
-        
-        currentOpenPositions--;
-        
-        // Get state after trade completes
-        const exitIdx = Math.min(i + tradeResult.bars_held, bars.length - 1);
-        const { data: nextIndicators } = await supabase
-          .from("technical_indicators")
-          .select("*")
-          .eq("symbol", symbol)
-          .eq("timeframe", "5m")
-          .lte("timestamp", bars[exitIdx].timestamp)
-          .order("timestamp", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        
-        if (nextIndicators) {
-          nextStateKey = getStateKey(nextIndicators);
-        }
-        
-        // Skip ahead past this trade
-        i += tradeResult.bars_held;
+      // Get state after trade completes
+      const exitIdx = Math.min(i + tradeResult.bars_held, bars.length - 1);
+      const { data: nextIndicators } = await supabase
+        .from("technical_indicators")
+        .select("*")
+        .eq("symbol", symbol)
+        .eq("timeframe", "5m")
+        .lte("timestamp", bars[exitIdx].timestamp)
+        .order("timestamp", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      
+      if (nextIndicators) {
+        nextStateKey = getStateKey(nextIndicators);
       }
+      
+      // Skip ahead past this trade
+      i += tradeResult.bars_held;
       
     } else if (actionIdx === 2) {
       actionCounts.buy++;
+      // BUY trade: simulate long position
+      const tradeResult = simulateTradeOutcome(
+        bars,
+        i,
+        "BUY",
+        Number(indicators.atr_14),
+        qState.q_table[stateKey],
+        actionIdx,
+        12 // max hold bars
+      );
+      reward = tradeResult.reward;
+      totalReward += reward;
+      totalTrades++;
+      totalReturnPct += tradeResult.pnl_pct;
+      totalDollarPnl += tradeResult.pnl_dollars;
+      totalConfidence += tradeResult.confidence_factor;
+      if (reward > 0) winningTrades++;
       
-      // Check position limits before trading
-      if (currentOpenPositions >= MAX_CONCURRENT_POSITIONS) {
-        // Skip trade - too many open positions
-        reward = -0.05; // Small penalty for trying to overtrade
-        totalReward += reward;
-      } else {
-        // BUY trade: simulate long position
-        currentOpenPositions++;
-        maxConcurrentPositions = Math.max(maxConcurrentPositions, currentOpenPositions);
-        
-        const tradeResult = simulateTradeOutcome(
-          bars,
-          i,
-          "BUY",
-          Number(indicators.atr_14),
-          qState.q_table[stateKey],
-          actionIdx,
-          12 // max hold bars
-        );
-        
-        // Update equity and metrics
-        currentEquity += tradeResult.pnl_dollars;
-        ACCOUNT_EQUITY = currentEquity; // Update for next position sizing
-        
-        reward = tradeResult.reward;
-        totalReward += reward;
-        totalTrades++;
-        totalReturnPct += tradeResult.pnl_pct;
-        totalDollarPnl += tradeResult.pnl_dollars;
-        totalConfidence += tradeResult.confidence_factor;
-        totalPositionNotional += tradeResult.position_size;
-        if (tradeResult.pnl_dollars > 0) winningTrades++;
-        
-        currentOpenPositions--;
-        
-        // Get state after trade completes
-        const exitIdx = Math.min(i + tradeResult.bars_held, bars.length - 1);
-        const { data: nextIndicators } = await supabase
-          .from("technical_indicators")
-          .select("*")
-          .eq("symbol", symbol)
-          .eq("timeframe", "5m")
-          .lte("timestamp", bars[exitIdx].timestamp)
-          .order("timestamp", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        
-        if (nextIndicators) {
-          nextStateKey = getStateKey(nextIndicators);
-        }
-        
-        // Skip ahead past this trade
-        i += tradeResult.bars_held;
+      // Get state after trade completes
+      const exitIdx = Math.min(i + tradeResult.bars_held, bars.length - 1);
+      const { data: nextIndicators } = await supabase
+        .from("technical_indicators")
+        .select("*")
+        .eq("symbol", symbol)
+        .eq("timeframe", "5m")
+        .lte("timestamp", bars[exitIdx].timestamp)
+        .order("timestamp", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      
+      if (nextIndicators) {
+        nextStateKey = getStateKey(nextIndicators);
       }
+      
+      // Skip ahead past this trade
+      i += tradeResult.bars_held;
       
     } else {
       actionCounts.hold++;
@@ -700,35 +643,15 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
   // Combine losses: L_total = α * L_imitation + (1-α) * L_RL
   const lossTotal = qState.alpha_imitation * lossImitation + (1 - qState.alpha_imitation) * lossRL;
   
-  // Calculate episode metrics
-  const endEquity = currentEquity;
-  const episodePnlUsd = endEquity - startEquity;
-  const episodeReturnPct = (episodePnlUsd / startEquity) * 100;
   const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
   const avgReturnPct = totalTrades > 0 ? totalReturnPct / totalTrades : 0;
   const avgDollarPnl = totalTrades > 0 ? totalDollarPnl / totalTrades : 0;
   const avgConfidence = totalTrades > 0 ? totalConfidence / totalTrades : 0;
-  const avgPositionNotional = totalTrades > 0 ? totalPositionNotional / totalTrades : 0;
-  const avgLeverage = avgPositionNotional > 0 ? avgPositionNotional / startEquity : 0;
   
-  // Scale reward to be % return (interpretable)
-  const scaledReward = episodeReturnPct;
-  
-  await log("INFO", `📊 Episode complete for ${symbol}:`, {
-    start_equity: `$${startEquity.toLocaleString()}`,
-    end_equity: `$${endEquity.toLocaleString()}`,
-    episode_pnl_usd: `$${episodePnlUsd >= 0 ? '+' : ''}${episodePnlUsd.toFixed(2)}`,
-    episode_return_pct: `${episodeReturnPct >= 0 ? '+' : ''}${episodeReturnPct.toFixed(3)}%`,
-    n_trades: totalTrades,
-    win_rate: `${winRate.toFixed(1)}%`,
-    avg_position_notional: `$${avgPositionNotional.toFixed(0)}`,
-    max_concurrent_positions: maxConcurrentPositions,
-    avg_leverage: `${avgLeverage.toFixed(2)}x`,
-    reward: scaledReward.toFixed(3),
-  });
+  await log("INFO", `Episode complete: ${steps} steps, reward: ${totalReward.toFixed(2)}, Win Rate: ${winRate.toFixed(1)}%, Avg Return: ${avgReturnPct.toFixed(2)}%, Avg P&L: $${avgDollarPnl.toFixed(2)}, Avg Confidence: ${(avgConfidence * 100).toFixed(1)}%, L_RL: ${lossRL.toFixed(4)}, L_imit: ${lossImitation.toFixed(4)}, L_total: ${lossTotal.toFixed(4)}`);
   
   return { 
-    reward: scaledReward, 
+    reward: totalReward, 
     steps,
     lossRL,
     lossImitation,
@@ -741,14 +664,6 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
     totalReturnPct,
     totalDollarPnl,
     avgConfidence,
-    startEquity,
-    endEquity,
-    episodePnlUsd,
-    episodeReturnPct,
-    nTrades: totalTrades,
-    avgPositionNotional,
-    maxConcurrentPositions,
-    avgLeverage,
   };
 }
 
@@ -758,8 +673,8 @@ async function runTrainingLoop(iterations: number = 10) {
   await log("INFO", `🚀 Starting autonomous RL training (${iterations} episodes)`);
   
   // Fetch Alpaca account equity first
-  const initialEquity = await fetchAlpacaAccount();
-  await log("INFO", `Using account equity: $${initialEquity.toLocaleString()} | Risk per trade: ${RISK_PER_TRADE_PCT}%`);
+  ACCOUNT_EQUITY = await fetchAlpacaAccount();
+  await log("INFO", `Using account equity: $${ACCOUNT_EQUITY.toLocaleString()} | Risk per trade: ${RISK_PER_TRADE_PCT}%`);
   
   // Load Q-state
   const qState = await loadQState();
@@ -779,9 +694,6 @@ async function runTrainingLoop(iterations: number = 10) {
   let totalConfidence = 0;
   
   for (let i = 0; i < iterations; i++) {
-    // Reset equity for each episode
-    ACCOUNT_EQUITY = initialEquity;
-    
     // Pick random symbol for each episode
     const symbol = symbols[Math.floor(Math.random() * symbols.length)];
     
