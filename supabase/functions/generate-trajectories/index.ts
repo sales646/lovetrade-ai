@@ -15,7 +15,7 @@ class ExpertStrategy {
   }
 
   // Returns action: -1 (sell), 0 (hold), 1 (buy), and entry_quality: 0-1
-  evaluate(features: any, newsFeatures: any[]): { action: number; entry_quality: number; reason: string } {
+  evaluate(features: any, newsFeatures: any[], previousFeatures: any[] = []): { action: number; entry_quality: number; reason: string } {
     return { action: 0, entry_quality: 0, reason: "Not implemented" };
   }
 }
@@ -25,7 +25,7 @@ class VWAPReversionStrategy extends ExpertStrategy {
     super("VWAP_REVERSION");
   }
 
-  override evaluate(features: any): { action: number; entry_quality: number; reason: string } {
+  override evaluate(features: any, newsFeatures: any[] = [], previousFeatures: any[] = []): { action: number; entry_quality: number; reason: string } {
     const { vwap_distance_pct, atr_14, close, rsi_14 } = features;
     
     if (!vwap_distance_pct || !atr_14 || !rsi_14) {
@@ -95,7 +95,7 @@ class TrendPullbackStrategy extends ExpertStrategy {
     super("TREND_PULLBACK");
   }
 
-  override evaluate(features: any): { action: number; entry_quality: number; reason: string } {
+  override evaluate(features: any, newsFeatures: any[] = [], previousFeatures: any[] = []): { action: number; entry_quality: number; reason: string } {
     const { close, ema_20, ema_50 } = features;
     
     if (!ema_20 || !ema_50) {
@@ -120,13 +120,250 @@ class TrendPullbackStrategy extends ExpertStrategy {
   }
 }
 
-// Add more strategies here following the same pattern...
+class RSIDivergenceStrategy extends ExpertStrategy {
+  constructor() {
+    super("RSI_DIVERGENCE");
+  }
+
+  override evaluate(features: any, newsFeatures: any[], previousFeatures: any[]): { action: number; entry_quality: number; reason: string } {
+    if (previousFeatures.length < 5) {
+      return { action: 0, entry_quality: 0, reason: "Insufficient history" };
+    }
+
+    const { close, rsi_14, volume_zscore } = features;
+    const prev = previousFeatures[previousFeatures.length - 1];
+    
+    if (!rsi_14 || !prev.rsi_14) {
+      return { action: 0, entry_quality: 0, reason: "Missing RSI data" };
+    }
+
+    // Bullish divergence: price lower low, RSI higher low
+    if (close < prev.close && rsi_14 > prev.rsi_14 && rsi_14 < 40 && volume_zscore > 1) {
+      const quality = Math.min(1, (40 - rsi_14) / 20);
+      return { action: 1, entry_quality: quality, reason: "Bullish RSI divergence" };
+    }
+
+    // Bearish divergence: price higher high, RSI lower high
+    if (close > prev.close && rsi_14 < prev.rsi_14 && rsi_14 > 60 && volume_zscore > 1) {
+      const quality = Math.min(1, (rsi_14 - 60) / 20);
+      return { action: -1, entry_quality: quality, reason: "Bearish RSI divergence" };
+    }
+
+    return { action: 0, entry_quality: 0, reason: "No divergence" };
+  }
+}
+
+class LiquiditySweepStrategy extends ExpertStrategy {
+  constructor() {
+    super("LIQUIDITY_SWEEP");
+  }
+
+  override evaluate(features: any, newsFeatures: any[], previousFeatures: any[]): { action: number; entry_quality: number; reason: string } {
+    if (previousFeatures.length < 3) {
+      return { action: 0, entry_quality: 0, reason: "Insufficient history" };
+    }
+
+    const { high, low, close, volume_zscore, range_pct } = features;
+    const prev = previousFeatures[previousFeatures.length - 1];
+    
+    // Detect sweep: break previous high/low with volume spike then immediate reversal
+    const brokeHigh = high > prev.high && close < (high + prev.high) / 2;
+    const brokeLow = low < prev.low && close > (low + prev.low) / 2;
+    
+    // High sweep (stop hunt above) → fade short
+    if (brokeHigh && volume_zscore > 2 && range_pct > 1) {
+      const quality = Math.min(1, volume_zscore / 4);
+      return { action: -1, entry_quality: quality, reason: "High sweep fade" };
+    }
+
+    // Low sweep (stop hunt below) → fade long
+    if (brokeLow && volume_zscore > 2 && range_pct > 1) {
+      const quality = Math.min(1, volume_zscore / 4);
+      return { action: 1, entry_quality: quality, reason: "Low sweep fade" };
+    }
+
+    return { action: 0, entry_quality: 0, reason: "No sweep detected" };
+  }
+}
+
+class VolumeSpikereversalStrategy extends ExpertStrategy {
+  constructor() {
+    super("VOLUME_SPIKE_REVERSAL");
+  }
+
+  override evaluate(features: any, newsFeatures: any[], previousFeatures: any[]): { action: number; entry_quality: number; reason: string } {
+    const { volume_zscore, close, rsi_14, range_pct } = features;
+    
+    if (volume_zscore < 3) {
+      return { action: 0, entry_quality: 0, reason: "No volume spike" };
+    }
+
+    if (previousFeatures.length < 2) {
+      return { action: 0, entry_quality: 0, reason: "Insufficient history" };
+    }
+
+    const prev = previousFeatures[previousFeatures.length - 1];
+    const direction = close > prev.close ? 1 : -1;
+
+    // Volume exhaustion reversal
+    if (direction === 1 && rsi_14 > 70 && range_pct > 2) {
+      const quality = Math.min(1, (volume_zscore - 3) / 3);
+      return { action: -1, entry_quality: quality, reason: "Bullish exhaustion reversal" };
+    }
+
+    if (direction === -1 && rsi_14 < 30 && range_pct > 2) {
+      const quality = Math.min(1, (volume_zscore - 3) / 3);
+      return { action: 1, entry_quality: quality, reason: "Bearish exhaustion reversal" };
+    }
+
+    return { action: 0, entry_quality: 0, reason: "No exhaustion signal" };
+  }
+}
+
+class VWAPDeltaStrategy extends ExpertStrategy {
+  constructor() {
+    super("VWAP_DELTA_CONFLUENCE");
+  }
+
+  override evaluate(features: any, newsFeatures: any[] = [], previousFeatures: any[] = []): { action: number; entry_quality: number; reason: string } {
+    const { close, vwap, vwap_distance_pct, volume_zscore } = features;
+    
+    if (!vwap || !vwap_distance_pct) {
+      return { action: 0, entry_quality: 0, reason: "Missing VWAP data" };
+    }
+
+    // Long: price above VWAP + positive volume (delta proxy)
+    if (close > vwap && vwap_distance_pct > 0.1 && volume_zscore > 1) {
+      const quality = Math.min(1, (vwap_distance_pct + volume_zscore) / 4);
+      return { action: 1, entry_quality: quality, reason: "VWAP + positive delta" };
+    }
+
+    // Short: price below VWAP + negative volume (delta proxy)
+    if (close < vwap && vwap_distance_pct < -0.1 && volume_zscore > 1) {
+      const quality = Math.min(1, (Math.abs(vwap_distance_pct) + volume_zscore) / 4);
+      return { action: -1, entry_quality: quality, reason: "VWAP + negative delta" };
+    }
+
+    return { action: 0, entry_quality: 0, reason: "No VWAP confluence" };
+  }
+}
+
+class AfternoonFadeStrategy extends ExpertStrategy {
+  constructor() {
+    super("AFTERNOON_FADE");
+  }
+
+  override evaluate(features: any, newsFeatures: any[], previousFeatures: any[]): { action: number; entry_quality: number; reason: string } {
+    const { timestamp, close, intraday_position, rsi_14 } = features;
+    
+    // Check if late session (14:00-16:00 ET would be around hour 19-21 UTC for US markets)
+    const hour = new Date(timestamp).getUTCHours();
+    if (hour < 19 || hour > 21) {
+      return { action: 0, entry_quality: 0, reason: "Not afternoon session" };
+    }
+
+    if (previousFeatures.length < 5) {
+      return { action: 0, entry_quality: 0, reason: "Insufficient history" };
+    }
+
+    // Fade from extremes when momentum weakens
+    if (intraday_position > 0.8 && rsi_14 > 65) {
+      const quality = Math.min(1, (intraday_position - 0.8) * 5);
+      return { action: -1, entry_quality: quality, reason: "Afternoon fade from high" };
+    }
+
+    if (intraday_position < 0.2 && rsi_14 < 35) {
+      const quality = Math.min(1, (0.2 - intraday_position) * 5);
+      return { action: 1, entry_quality: quality, reason: "Afternoon fade from low" };
+    }
+
+    return { action: 0, entry_quality: 0, reason: "No fade setup" };
+  }
+}
+
+class GapFillStrategy extends ExpertStrategy {
+  constructor() {
+    super("GAP_FILL");
+  }
+
+  override evaluate(features: any, newsFeatures: any[], previousFeatures: any[]): { action: number; entry_quality: number; reason: string } {
+    if (previousFeatures.length < 1) {
+      return { action: 0, entry_quality: 0, reason: "No previous bar" };
+    }
+
+    const { open, close, volume_zscore } = features;
+    const prevClose = previousFeatures[previousFeatures.length - 1].close;
+    
+    const gapPct = ((open - prevClose) / prevClose) * 100;
+    
+    // Gap up > 1% → fade towards previous close
+    if (gapPct > 1 && volume_zscore < 2) {
+      const quality = Math.min(1, Math.abs(gapPct) / 3);
+      return { action: -1, entry_quality: quality, reason: "Gap up fill" };
+    }
+
+    // Gap down > 1% → long towards previous close
+    if (gapPct < -1 && volume_zscore < 2) {
+      const quality = Math.min(1, Math.abs(gapPct) / 3);
+      return { action: 1, entry_quality: quality, reason: "Gap down fill" };
+    }
+
+    return { action: 0, entry_quality: 0, reason: "No significant gap" };
+  }
+}
+
+class OpeningRangeBreakoutStrategy extends ExpertStrategy {
+  constructor() {
+    super("OPENING_RANGE_BREAKOUT");
+  }
+
+  override evaluate(features: any, newsFeatures: any[], previousFeatures: any[]): { action: number; entry_quality: number; reason: string } {
+    const { timestamp, high, low, close, volume_zscore } = features;
+    
+    // Check if within first 30 minutes of session (9:30-10:00 ET → ~14:30-15:00 UTC)
+    const hour = new Date(timestamp).getUTCHours();
+    const minute = new Date(timestamp).getUTCMinutes();
+    
+    if (hour !== 14 || minute > 30) {
+      return { action: 0, entry_quality: 0, reason: "Not opening range period" };
+    }
+
+    if (previousFeatures.length < 6) {
+      return { action: 0, entry_quality: 0, reason: "Insufficient opening bars" };
+    }
+
+    // Calculate opening range from first bars
+    const openingBars = previousFeatures.slice(-6);
+    const orHigh = Math.max(...openingBars.map((b: any) => b.high));
+    const orLow = Math.min(...openingBars.map((b: any) => b.low));
+    
+    // Breakout above range
+    if (close > orHigh && volume_zscore > 1.5) {
+      const quality = Math.min(1, volume_zscore / 3);
+      return { action: 1, entry_quality: quality, reason: "ORB breakout high" };
+    }
+
+    // Breakdown below range
+    if (close < orLow && volume_zscore > 1.5) {
+      const quality = Math.min(1, volume_zscore / 3);
+      return { action: -1, entry_quality: quality, reason: "ORB breakdown low" };
+    }
+
+    return { action: 0, entry_quality: 0, reason: "No ORB signal" };
+  }
+}
 
 const STRATEGIES = [
   new VWAPReversionStrategy(),
   new NewsMomentumStrategy(),
   new TrendPullbackStrategy(),
-  // TODO: Implement remaining 7 strategies
+  new RSIDivergenceStrategy(),
+  new LiquiditySweepStrategy(),
+  new VolumeSpikereversalStrategy(),
+  new VWAPDeltaStrategy(),
+  new AfternoonFadeStrategy(),
+  new GapFillStrategy(),
+  new OpeningRangeBreakoutStrategy(),
 ];
 
 serve(async (req) => {
@@ -195,9 +432,12 @@ serve(async (req) => {
         return diffMinutes >= 0 && diffMinutes <= 120;
       }) || [];
 
+      // Get previous features for strategies that need history
+      const previousFeatures = i > 0 ? indicators.slice(Math.max(0, i - 10), i) : [];
+
       // Run all strategies
       for (const strategy of STRATEGIES) {
-        const result = strategy.evaluate(features, relevantNews);
+        const result = strategy.evaluate(features, relevantNews, previousFeatures);
         
         if (result.action !== 0 && result.entry_quality > 0.3) {
           // Calculate reward (simplified - would need actual exit logic)
