@@ -49,7 +49,7 @@ export function useQState() {
       const { data, error } = await supabase
         .from("rl_q_state")
         .select("*")
-        .single();
+        .maybeSingle();
 
       if (error) throw error;
       return data;
