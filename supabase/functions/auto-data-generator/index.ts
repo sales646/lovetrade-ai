@@ -22,16 +22,86 @@ async function log(level: "INFO" | "WARN" | "ERROR", message: string, metadata?:
   });
 }
 
-// Generate synthetic market data (simulates real trading conditions)
-function generateSyntheticBar(basePrice: number, volatility: number, timestamp: Date) {
-  const change = (Math.random() - 0.5) * volatility * basePrice;
-  const open = basePrice;
-  const close = basePrice + change;
-  const high = Math.max(open, close) + Math.random() * volatility * basePrice * 0.3;
-  const low = Math.min(open, close) - Math.random() * volatility * basePrice * 0.3;
-  const volume = Math.floor(1000000 + Math.random() * 5000000);
+// Market regime types
+type MarketRegime = "STRONG_TREND_UP" | "STRONG_TREND_DOWN" | "WEAK_TREND_UP" | "WEAK_TREND_DOWN" | "SIDEWAYS" | "CHOPPY" | "HIGH_VOLATILITY";
+
+// Generate realistic market data with different regimes
+function generateRealisticBars(basePrice: number, numBars: number, startTime: Date) {
+  const bars = [];
+  let currentPrice = basePrice;
+  let regime: MarketRegime = "SIDEWAYS";
+  let regimeLength = 0;
+  let trendStrength = 0;
   
-  return { open, high, low, close, volume, timestamp };
+  for (let i = 0; i < numBars; i++) {
+    // Change regime every 30-100 bars
+    if (regimeLength === 0) {
+      const regimes: MarketRegime[] = ["STRONG_TREND_UP", "STRONG_TREND_DOWN", "WEAK_TREND_UP", "WEAK_TREND_DOWN", "SIDEWAYS", "CHOPPY", "HIGH_VOLATILITY"];
+      regime = regimes[Math.floor(Math.random() * regimes.length)];
+      regimeLength = Math.floor(30 + Math.random() * 70);
+      trendStrength = 0.3 + Math.random() * 0.7;
+    }
+    regimeLength--;
+    
+    const timestamp = new Date(startTime);
+    timestamp.setMinutes(timestamp.getMinutes() + i * 5);
+    
+    // Generate bar based on regime
+    let drift = 0;
+    let volatility = 0.015; // Base 1.5%
+    
+    switch (regime) {
+      case "STRONG_TREND_UP":
+        drift = 0.002 * trendStrength; // 0.2% per bar
+        volatility = 0.01;
+        break;
+      case "STRONG_TREND_DOWN":
+        drift = -0.002 * trendStrength;
+        volatility = 0.01;
+        break;
+      case "WEAK_TREND_UP":
+        drift = 0.0005 * trendStrength;
+        volatility = 0.015;
+        break;
+      case "WEAK_TREND_DOWN":
+        drift = -0.0005 * trendStrength;
+        volatility = 0.015;
+        break;
+      case "SIDEWAYS":
+        drift = (Math.random() - 0.5) * 0.0003; // Very small random drift
+        volatility = 0.008; // Low volatility
+        break;
+      case "CHOPPY":
+        drift = (Math.random() - 0.5) * 0.001; // Random whipsaws
+        volatility = 0.02; // Higher volatility
+        break;
+      case "HIGH_VOLATILITY":
+        drift = (Math.random() - 0.5) * 0.003; // Large swings
+        volatility = 0.03;
+        break;
+    }
+    
+    // Add noise
+    const noise = (Math.random() - 0.5) * volatility * currentPrice;
+    currentPrice = currentPrice * (1 + drift) + noise;
+    
+    // Generate OHLC
+    const open = currentPrice;
+    const close = currentPrice + (Math.random() - 0.5) * volatility * currentPrice;
+    const high = Math.max(open, close) * (1 + Math.random() * volatility * 0.5);
+    const low = Math.min(open, close) * (1 - Math.random() * volatility * 0.5);
+    
+    // Volume varies with volatility
+    const baseVolume = 2000000;
+    const volumeMultiplier = regime === "HIGH_VOLATILITY" ? 2.5 : regime === "CHOPPY" ? 1.8 : 1.0;
+    const volume = Math.floor(baseVolume * volumeMultiplier * (0.5 + Math.random()));
+    
+    currentPrice = close;
+    
+    bars.push({ open, high, low, close, volume, timestamp, regime });
+  }
+  
+  return bars;
 }
 
 function calculateTechnicalIndicators(bars: any[]) {
@@ -112,6 +182,7 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
   for (let i = 32; i < indicators.length; i++) {
     const ind = indicators[i];
     const bar = bars[i + 14]; // Offset for indicator calculation
+    const regime = bar.regime;
     
     // Frame stack (last 32 bars with indicators)
     const frameStack = [];
@@ -126,101 +197,120 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
       });
     }
     
-    // Strategy 1: RSI_EMA (40% weight)
-    if (ind.rsi_14 < 30 && ind.ema_20 > ind.ema_50) {
+    // Quality score based on regime (0-1)
+    let regimeQuality = 0.5; // Default
+    if (regime === "STRONG_TREND_UP" || regime === "STRONG_TREND_DOWN") regimeQuality = 0.9;
+    else if (regime === "WEAK_TREND_UP" || regime === "WEAK_TREND_DOWN") regimeQuality = 0.7;
+    else if (regime === "SIDEWAYS") regimeQuality = 0.3; // Low quality, prefer HOLD
+    else if (regime === "CHOPPY" || regime === "HIGH_VOLATILITY") regimeQuality = 0.2; // Very low, avoid trading
+    
+    // More selective strategies - only trade in good conditions
+    const shouldAvoidTrading = regime === "CHOPPY" || regime === "HIGH_VOLATILITY" || regime === "SIDEWAYS";
+    
+    // Strategy 1: RSI_EMA (40% weight) - only in trending markets
+    if (!shouldAvoidTrading && ind.rsi_14 < 30 && ind.ema_20 > ind.ema_50 && regime.includes("TREND_UP")) {
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "RSI_EMA",
         action: 1, // BUY
-        reward: Math.random() * 2 - 0.5, // Simulated reward
+        reward: (Math.random() * 2 - 0.5) * regimeQuality, // Reward scaled by regime quality
         obs_features: { frame_stack: frameStack, current: ind },
-        entry_quality: 0.8,
+        regime_tag: regime,
+        entry_quality: regimeQuality * 0.9,
         rr_ratio: 2.0,
-        delta_equity: Math.random() * 100,
+        delta_equity: Math.random() * 100 * regimeQuality,
         fees: 0.1,
         slippage: 0.05,
       });
-    } else if (ind.rsi_14 > 70 && ind.ema_20 < ind.ema_50) {
+    } else if (!shouldAvoidTrading && ind.rsi_14 > 70 && ind.ema_20 < ind.ema_50 && regime.includes("TREND_DOWN")) {
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "RSI_EMA",
         action: -1, // SELL
-        reward: Math.random() * 2 - 0.5,
+        reward: (Math.random() * 2 - 0.5) * regimeQuality,
         obs_features: { frame_stack: frameStack, current: ind },
-        entry_quality: 0.8,
+        regime_tag: regime,
+        entry_quality: regimeQuality * 0.9,
         rr_ratio: 2.0,
-        delta_equity: Math.random() * 100,
+        delta_equity: Math.random() * 100 * regimeQuality,
         fees: 0.1,
         slippage: 0.05,
       });
     }
     
-    // Strategy 2: VWAP_REVERSION (30% weight)
-    if (ind.vwap_distance_pct < -1.5 && ind.volume_zscore > 1.5) {
+    // Strategy 2: VWAP_REVERSION (30% weight) - works in all regimes except choppy
+    if (regime !== "CHOPPY" && ind.vwap_distance_pct < -1.5 && ind.volume_zscore > 1.5) {
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "VWAP_REVERSION",
         action: 1, // BUY
-        reward: Math.random() * 2 - 0.5,
+        reward: (Math.random() * 2 - 0.5) * regimeQuality,
         obs_features: { frame_stack: frameStack, current: ind },
-        entry_quality: 0.75,
+        regime_tag: regime,
+        entry_quality: regimeQuality * 0.8,
         rr_ratio: 1.8,
-        delta_equity: Math.random() * 80,
+        delta_equity: Math.random() * 80 * regimeQuality,
         fees: 0.1,
         slippage: 0.05,
       });
-    } else if (ind.vwap_distance_pct > 1.5 && ind.volume_zscore > 1.5) {
+    } else if (regime !== "CHOPPY" && ind.vwap_distance_pct > 1.5 && ind.volume_zscore > 1.5) {
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "VWAP_REVERSION",
         action: -1, // SELL
-        reward: Math.random() * 2 - 0.5,
+        reward: (Math.random() * 2 - 0.5) * regimeQuality,
         obs_features: { frame_stack: frameStack, current: ind },
-        entry_quality: 0.75,
+        regime_tag: regime,
+        entry_quality: regimeQuality * 0.8,
         rr_ratio: 1.8,
-        delta_equity: Math.random() * 80,
+        delta_equity: Math.random() * 80 * regimeQuality,
         fees: 0.1,
         slippage: 0.05,
       });
     }
     
-    // Strategy 3: TREND_PULLBACK (10% weight)
-    if (ind.ema_20 > ind.ema_50 && ind.rsi_14 < 45) {
+    // Strategy 3: TREND_PULLBACK (10% weight) - only in strong trends
+    if (regime.includes("STRONG_TREND") && ind.ema_20 > ind.ema_50 && ind.rsi_14 < 45) {
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "TREND_PULLBACK",
         action: 1, // BUY
-        reward: Math.random() * 1.5 - 0.3,
+        reward: (Math.random() * 1.5 - 0.3) * regimeQuality,
         obs_features: { frame_stack: frameStack, current: ind },
-        entry_quality: 0.7,
+        regime_tag: regime,
+        entry_quality: regimeQuality * 0.75,
         rr_ratio: 2.5,
-        delta_equity: Math.random() * 120,
+        delta_equity: Math.random() * 120 * regimeQuality,
         fees: 0.1,
         slippage: 0.05,
       });
     }
     
-    // Add some HOLD actions too (important for learning)
-    if (Math.random() < 0.3) {
+    // HOLD actions - much more frequent in bad conditions (CRITICAL for learning to stay out)
+    const holdProbability = shouldAvoidTrading ? 0.7 : 0.2; // 70% HOLD in choppy/volatile, 20% otherwise
+    if (Math.random() < holdProbability) {
+      // Reward HOLD in bad conditions, penalize in good conditions
+      const holdReward = shouldAvoidTrading ? 0.1 : -0.05; // Positive reward for staying out in bad conditions
       trajectories.push({
         symbol,
         timeframe: "5m",
         timestamp: ind.timestamp,
         tactic_id: "HOLD_BASELINE",
         action: 0, // HOLD
-        reward: -0.05, // Small penalty
+        reward: holdReward,
         obs_features: { frame_stack: frameStack, current: ind },
-        entry_quality: 0.5,
+        regime_tag: regime,
+        entry_quality: shouldAvoidTrading ? 0.8 : 0.3, // High quality to HOLD in bad conditions
         rr_ratio: 1.0,
         delta_equity: 0,
         fees: 0,
@@ -245,21 +335,12 @@ async function generateDataForSymbol(symbol: string, numBars: number = 500) {
   };
   
   const basePrice = basePrices[symbol] || 100;
-  const volatility = 0.02; // 2% volatility
   
-  // Generate synthetic bars
-  const bars = [];
+  // Generate realistic bars with different market regimes
   const startTime = new Date();
   startTime.setDate(startTime.getDate() - 7); // Start 7 days ago
   
-  for (let i = 0; i < numBars; i++) {
-    const timestamp = new Date(startTime);
-    timestamp.setMinutes(timestamp.getMinutes() + i * 5); // 5-minute bars
-    
-    const currentPrice = basePrice * (1 + (Math.sin(i / 20) * 0.05)); // Add some trend
-    const bar = generateSyntheticBar(currentPrice, volatility, timestamp);
-    bars.push(bar);
-  }
+  const bars = generateRealisticBars(basePrice, numBars, startTime);
   
   // Insert bars into database
   await log("INFO", `💾 Inserting ${bars.length} bars for ${symbol}...`);

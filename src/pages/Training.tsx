@@ -319,70 +319,75 @@ export default function Training() {
             </div>
 
             <div className="rounded-lg border border-border bg-muted/50 p-4">
-              <h4 className="font-semibold mb-3">📊 How Scenarios Are Generated:</h4>
+              <h4 className="font-semibold mb-3">📊 Realistic Multi-Market Scenario Generation:</h4>
               
               <div className="space-y-3">
                 <div>
                   <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">1.</span> Synthetic Market Data
+                    <span className="text-primary">1.</span> Market Regime Detection
                   </h5>
                   <p className="text-xs text-muted-foreground ml-5">
-                    Creates realistic OHLCV bars with 2% volatility, trending patterns (sine waves), 
-                    and volume fluctuations simulating real market conditions
+                    Each symbol cycles through 7 realistic market regimes: <strong>STRONG_TREND_UP/DOWN</strong> (clear trends), 
+                    <strong>WEAK_TREND_UP/DOWN</strong> (uncertain trends), <strong>SIDEWAYS</strong> (ranging), 
+                    <strong>CHOPPY</strong> (whipsaws), <strong>HIGH_VOLATILITY</strong> (erratic). Regimes last 30-100 bars.
                   </p>
                 </div>
                 
                 <div>
                   <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">2.</span> Technical Indicators
+                    <span className="text-primary">2.</span> Realistic Price Patterns
                   </h5>
                   <p className="text-xs text-muted-foreground ml-5">
-                    Calculates RSI(14), ATR(14), VWAP, EMA(20/50), volume z-score, intraday position, 
-                    and range % for each bar
+                    Price drifts, volatility, and volume adapt to regime. Strong trends have 0.2% drift/bar with 1% vol. 
+                    Choppy markets have random 0.1% swings with 2% vol. High vol has 3% swings.
                   </p>
                 </div>
                 
                 <div>
                   <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">3.</span> Expert Trading Strategies
+                    <span className="text-primary">3.</span> Regime-Aware Expert Strategies
                   </h5>
                   <ul className="space-y-1 text-xs text-muted-foreground ml-5">
                     <li className="flex items-start gap-2">
                       <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
-                      <span><strong>RSI_EMA (40%):</strong> Buy when RSI&lt;30 & EMA20&gt;EMA50, Sell when RSI&gt;70 & EMA20&lt;EMA50</span>
+                      <span><strong>RSI_EMA:</strong> Only trades in TREND regimes (quality 0.9), skips choppy/sideways</span>
                     </li>
                     <li className="flex items-start gap-2">
                       <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
-                      <span><strong>VWAP_REVERSION (30%):</strong> Buy/Sell on ±1.5% VWAP distance with high volume</span>
+                      <span><strong>VWAP_REVERSION:</strong> Avoids CHOPPY regime entirely (quality 0.2-0.8)</span>
                     </li>
                     <li className="flex items-start gap-2">
                       <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
-                      <span><strong>TREND_PULLBACK (10%):</strong> Buy pullbacks in uptrends (EMA20&gt;EMA50, RSI&lt;45)</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
-                      <span><strong>HOLD_BASELINE (30%):</strong> Random HOLD actions with -0.05 penalty</span>
+                      <span><strong>TREND_PULLBACK:</strong> Only fires in STRONG_TREND regimes (quality 0.9)</span>
                     </li>
                   </ul>
                 </div>
                 
                 <div>
                   <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">4.</span> Frame Stack Features
+                    <span className="text-primary">4.</span> Stay-Out Logic (CRITICAL)
                   </h5>
                   <p className="text-xs text-muted-foreground ml-5">
-                    Each trajectory includes 32 bars of historical context with close, volume, RSI, ATR, 
-                    VWAP distance, and volume z-score for sequence learning
+                    <strong>70% HOLD probability</strong> in CHOPPY/HIGH_VOL/SIDEWAYS vs 20% in good conditions. 
+                    HOLD gets <strong>+0.1 reward</strong> in bad regimes (teaches bot to stay out), -0.05 in good regimes. 
+                    Entry quality: 0.8 for HOLD in bad conditions vs 0.3 in good conditions.
                   </p>
                 </div>
                 
                 <div>
                   <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">5.</span> Reward Simulation
+                    <span className="text-primary">5.</span> Quality & Reward Scaling
                   </h5>
                   <p className="text-xs text-muted-foreground ml-5">
-                    Generates simulated rewards, entry quality (0.7-0.8), risk/reward ratios (1.8-2.5), 
-                    delta equity, fees (0.1), and slippage (0.05) for realistic training
+                    All rewards and equity changes scale by regime quality (0.2-0.9). Strong trends = high rewards, 
+                    choppy markets = low/negative rewards. Teaches bot to recognize and avoid unfavorable conditions.
+                  </p>
+                </div>
+                
+                <div className="pt-2 border-t border-primary/10">
+                  <p className="text-xs font-medium text-primary">
+                    🎯 Result: Bot learns to scan 5 symbols simultaneously, identify which are in good vs bad regimes, 
+                    and only take high-quality trades while staying out of choppy/unclear markets.
                   </p>
                 </div>
               </div>
