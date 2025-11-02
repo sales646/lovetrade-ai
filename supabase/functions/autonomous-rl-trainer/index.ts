@@ -171,19 +171,19 @@ function simulateTradeOutcome(
   const entryBar = bars[entryIndex];
   const entryPrice = Number(entryBar.close);
   
-  // AGGRESSIVE risk management parameters
-  const stopLossDistance = atr * 1.5; // Tighter 1.5x ATR stop
-  const takeProfitDistance = atr * 6; // Bigger 6x ATR target = 4:1 R:R
-  const slippagePct = 0.08; // More slippage from aggressive entries
-  const feesPct = 0.12; // Slightly higher fees from more trading
+  // REALISTIC risk management parameters
+  const stopLossDistance = atr * 1.5; // Tight 1.5x ATR stop
+  const takeProfitPct = 3.5; // 3.5% target (realistic with leverage)
+  const slippagePct = 0.08; // Slippage from entries
+  const feesPct = 0.12; // Trading fees
   
   const stopLossPrice = side === "BUY" 
     ? entryPrice - stopLossDistance 
     : entryPrice + stopLossDistance;
   
   const takeProfitPrice = side === "BUY" 
-    ? entryPrice + takeProfitDistance 
-    : entryPrice - takeProfitDistance;
+    ? entryPrice * (1 + takeProfitPct / 100)
+    : entryPrice * (1 - takeProfitPct / 100);
   
   // Walk forward through bars to find exit
   let exitPrice = entryPrice;
@@ -222,7 +222,7 @@ function simulateTradeOutcome(
       }
     }
     
-    // Aggressive time-based exit
+    // Time-based exit
     if (barsHeld >= maxHoldBars) {
       exitPrice = Number(bar.close);
       exitReason = "TIME";
@@ -238,8 +238,8 @@ function simulateTradeOutcome(
   // Apply slippage and fees
   const netPnlPct = grossPnlPct - slippagePct - feesPct;
   
-  // Aggressive reward scaling: +5% = +1.5 reward, -2.5% = -0.75 reward
-  const reward = netPnlPct / 3.3;
+  // Reward scaling: +3.5% = +1.0 reward, -1.5% = -0.5 reward
+  const reward = netPnlPct / 3.5;
   
   return {
     reward,

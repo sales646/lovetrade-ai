@@ -212,11 +212,11 @@ export default function Training() {
             
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div className="rounded-lg border border-border bg-muted/30 p-3">
-                <div className="font-semibold mb-2">⚡ Aggressive Settings</div>
+                <div className="font-semibold mb-2">⚡ Realistic Settings</div>
                 <div className="space-y-1 text-muted-foreground">
-                  <div>• Stop: <span className="text-red-500 font-mono">1.5×ATR</span> (tight)</div>
-                  <div>• Target: <span className="text-green-500 font-mono">6×ATR</span> (4:1 R:R)</div>
-                  <div>• Max Hold: <span className="font-mono">10-15 bars</span></div>
+                  <div>• Stop: <span className="text-red-500 font-mono">1.5×ATR</span></div>
+                  <div>• Target: <span className="text-green-500 font-mono">3.5%</span> fixed</div>
+                  <div>• Max Hold: <span className="font-mono">12 bars</span> (1hr)</div>
                   <div>• Fees: <span className="font-mono">0.12%</span> | Slip: <span className="font-mono">0.08%</span></div>
                 </div>
               </div>
@@ -417,7 +417,7 @@ export default function Training() {
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-green-500">3.</span>
-                  <span>Exit Logic → Stop: 1.5×ATR | Target: 6×ATR | Max: 10-15 bars</span>
+                  <span>Exit Logic → Stop: 1.5×ATR | Target: 3.5% | Max: 12 bars (1hr)</span>
                 </div>
                 <div className="flex items-center gap-2 ml-4">
                   <span className="text-blue-500">↓</span>
@@ -436,11 +436,11 @@ export default function Training() {
             
             <div className="grid grid-cols-3 gap-2 text-xs">
               <div className="rounded border border-green-500/30 bg-green-500/10 p-2">
-                <div className="font-semibold text-green-600">Aggressive Profile</div>
+                <div className="font-semibold text-green-600">Realistic Profile</div>
                 <div className="text-muted-foreground mt-1">
                   • Tight 1.5×ATR stops<br/>
-                  • Big 6×ATR targets (4:1)<br/>
-                  • Fast 10-15 bar exits
+                  • Fixed 3.5% targets<br/>
+                  • Fast 12 bar exits (1hr)
                 </div>
               </div>
               <div className="rounded border border-blue-500/30 bg-blue-500/10 p-2">

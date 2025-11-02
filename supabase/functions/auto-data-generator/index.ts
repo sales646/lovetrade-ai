@@ -187,19 +187,19 @@ function simulateTradeOutcome(
   const entryBar = bars[entryIndex];
   const entryPrice = entryBar.close;
   
-  // AGGRESSIVE risk management parameters
-  const stopLossDistance = atr * 1.5; // Tighter 1.5x ATR stop (was 2x)
-  const takeProfitDistance = atr * 6; // Bigger 6x ATR target (was 4x) = 4:1 R:R
-  const slippagePct = 0.08; // More slippage from aggressive entries
-  const feesPct = 0.12; // Slightly higher fees from more trading
+  // REALISTIC risk management parameters
+  const stopLossDistance = atr * 1.5; // Tight 1.5x ATR stop
+  const takeProfitPct = 3.5; // 3.5% target (realistic with leverage)
+  const slippagePct = 0.08; // Slippage from entries
+  const feesPct = 0.12; // Trading fees
   
   const stopLossPrice = side === "BUY" 
     ? entryPrice - stopLossDistance 
     : entryPrice + stopLossDistance;
   
   const takeProfitPrice = side === "BUY" 
-    ? entryPrice + takeProfitDistance 
-    : entryPrice - takeProfitDistance;
+    ? entryPrice * (1 + takeProfitPct / 100)
+    : entryPrice * (1 - takeProfitPct / 100);
   
   // Walk forward through bars to find exit
   let exitPrice = entryPrice;
@@ -238,7 +238,7 @@ function simulateTradeOutcome(
       }
     }
     
-    // Aggressive time-based exit (cut losers fast)
+    // Time-based exit
     if (barsHeld >= maxHoldBars) {
       exitPrice = bar.close;
       exitReason = "TIME";
@@ -254,13 +254,12 @@ function simulateTradeOutcome(
   // Apply slippage and fees
   const netPnlPct = grossPnlPct - slippagePct - feesPct;
   
-  // Aggressive reward scaling: +5% = +1.5 reward (was +1.0), -2.5% = -0.75 reward (was -0.5)
-  // This amplifies both wins and losses to encourage decisiveness
-  const reward = netPnlPct / 3.3;
+  // Reward scaling: +3.5% = +1.0 reward, -1.5% = -0.5 reward
+  const reward = netPnlPct / 3.5;
   
   const win = netPnlPct > 0;
   const entryQuality = win ? 0.85 + Math.random() * 0.15 : 0.05 + Math.random() * 0.2;
-  const rrRatio = win ? Math.abs(netPnlPct / 1.5) : 0.3; // More extreme R:R
+  const rrRatio = win ? Math.abs(netPnlPct / 1.5) : 0.3;
   
   return {
     reward,
@@ -269,8 +268,8 @@ function simulateTradeOutcome(
     bars_held: barsHeld,
     win,
     entry_quality: entryQuality,
-    rr_ratio: Math.min(rrRatio, 5.0), // Cap at 5:1 (was 3:1)
-    delta_equity: netPnlPct * 15, // Bigger position sizing implied (was 10)
+    rr_ratio: Math.min(rrRatio, 3.0), // Cap at 3:1
+    delta_equity: netPnlPct * 10,
     fees: feesPct,
     slippage: slippagePct,
   };
