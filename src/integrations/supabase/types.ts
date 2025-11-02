@@ -104,6 +104,47 @@ export type Database = {
         }
         Relationships: []
       }
+      expert_contributions: {
+        Row: {
+          accuracy: number
+          created_at: string
+          expert_name: string
+          id: string
+          loss_contribution: number
+          sample_count: number
+          training_metric_id: string | null
+          weight: number
+        }
+        Insert: {
+          accuracy: number
+          created_at?: string
+          expert_name: string
+          id?: string
+          loss_contribution: number
+          sample_count: number
+          training_metric_id?: string | null
+          weight: number
+        }
+        Update: {
+          accuracy?: number
+          created_at?: string
+          expert_name?: string
+          id?: string
+          loss_contribution?: number
+          sample_count?: number
+          training_metric_id?: string | null
+          weight?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "expert_contributions_training_metric_id_fkey"
+            columns: ["training_metric_id"]
+            isOneToOne: false
+            referencedRelation: "rl_training_metrics"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       expert_trajectories: {
         Row: {
           action: number
@@ -472,36 +513,66 @@ export type Database = {
       }
       rl_training_metrics: {
         Row: {
+          action_buy_pct: number | null
+          action_hold_pct: number | null
+          action_sell_pct: number | null
+          alpha_mix: number | null
           avg_reward: number
           avg_steps: number
           created_at: string
           duration_seconds: number
           episodes: number
           epsilon: number
+          expert_accuracies: Json | null
           id: string
+          l_imitation: number | null
+          l_rl: number | null
+          l_total: number | null
           q_table_size: number
+          sharpe_ratio: number | null
+          sortino_ratio: number | null
           total_episodes: number
         }
         Insert: {
+          action_buy_pct?: number | null
+          action_hold_pct?: number | null
+          action_sell_pct?: number | null
+          alpha_mix?: number | null
           avg_reward: number
           avg_steps: number
           created_at?: string
           duration_seconds: number
           episodes: number
           epsilon: number
+          expert_accuracies?: Json | null
           id?: string
+          l_imitation?: number | null
+          l_rl?: number | null
+          l_total?: number | null
           q_table_size: number
+          sharpe_ratio?: number | null
+          sortino_ratio?: number | null
           total_episodes: number
         }
         Update: {
+          action_buy_pct?: number | null
+          action_hold_pct?: number | null
+          action_sell_pct?: number | null
+          alpha_mix?: number | null
           avg_reward?: number
           avg_steps?: number
           created_at?: string
           duration_seconds?: number
           episodes?: number
           epsilon?: number
+          expert_accuracies?: Json | null
           id?: string
+          l_imitation?: number | null
+          l_rl?: number | null
+          l_total?: number | null
           q_table_size?: number
+          sharpe_ratio?: number | null
+          sortino_ratio?: number | null
           total_episodes?: number
         }
         Relationships: []

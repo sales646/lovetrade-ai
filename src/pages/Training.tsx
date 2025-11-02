@@ -256,6 +256,107 @@ export default function Training() {
         </CardContent>
       </Card>
 
+      {/* Expert Imitation Stats */}
+      {latestMetric && latestMetric.expert_accuracies && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Expert Imitation Performance</CardTitle>
+            <CardDescription>Weighted accuracy vs expert demonstrations</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+              {Object.entries(latestMetric.expert_accuracies as Record<string, number>)
+                .sort((a, b) => b[1] - a[1])
+                .map(([expert, accuracy]) => {
+                  const weight = expert === "RSI_EMA" ? 0.40 
+                    : expert === "VWAP_REVERSION" ? 0.30
+                    : expert === "TREND_PULLBACK" ? 0.10
+                    : expert === "VWAP_DELTA_CONFLUENCE" ? 0.10
+                    : expert === "AFTERNOON_FADE" ? 0.05
+                    : expert === "LIQUIDITY_SWEEP" ? 0.05 : 0;
+                  
+                  return (
+                    <div key={expert} className="rounded-lg border border-border bg-muted/50 p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium">{expert.replace(/_/g, " ")}</span>
+                        <Badge variant="outline" className="text-xs">
+                          w={weight.toFixed(2)}
+                        </Badge>
+                      </div>
+                      <div className="text-2xl font-bold">{(accuracy * 100).toFixed(1)}%</div>
+                      <Progress value={accuracy * 100} className="mt-2" />
+                    </div>
+                  );
+                })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Loss & Action Distribution */}
+      {latestMetric && (
+        <div className="grid gap-4 md:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>Loss Components</CardTitle>
+              <CardDescription>Imitation vs RL loss contributions</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm text-muted-foreground">L_imitation (α={latestMetric.alpha_mix?.toFixed(2) || "—"})</span>
+                  <span className="text-sm font-medium">{Number(latestMetric.l_imitation || 0).toFixed(4)}</span>
+                </div>
+                <Progress value={(latestMetric.alpha_mix || 0) * 100} className="h-2" />
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm text-muted-foreground">L_rl (1-α={(1 - (latestMetric.alpha_mix || 0)).toFixed(2)})</span>
+                  <span className="text-sm font-medium">{Number(latestMetric.l_rl || 0).toFixed(4)}</span>
+                </div>
+                <Progress value={(1 - (latestMetric.alpha_mix || 0)) * 100} className="h-2" />
+              </div>
+              <div className="pt-2 border-t">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold">L_total</span>
+                  <span className="text-lg font-bold">{Number(latestMetric.l_total || 0).toFixed(4)}</span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Action Distribution</CardTitle>
+              <CardDescription>Policy action preferences</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm text-muted-foreground">BUY</span>
+                  <span className="text-sm font-medium">{Number(latestMetric.action_buy_pct || 0).toFixed(1)}%</span>
+                </div>
+                <Progress value={Number(latestMetric.action_buy_pct || 0)} className="h-2 [&>div]:bg-green-500" />
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm text-muted-foreground">HOLD</span>
+                  <span className="text-sm font-medium">{Number(latestMetric.action_hold_pct || 0).toFixed(1)}%</span>
+                </div>
+                <Progress value={Number(latestMetric.action_hold_pct || 0)} className="h-2 [&>div]:bg-yellow-500" />
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-sm text-muted-foreground">SELL</span>
+                  <span className="text-sm font-medium">{Number(latestMetric.action_sell_pct || 0).toFixed(1)}%</span>
+                </div>
+                <Progress value={Number(latestMetric.action_sell_pct || 0)} className="h-2 [&>div]:bg-red-500" />
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       {/* Training Progress Chart */}
       {chartData.length > 0 && (
         <Card>
@@ -311,7 +412,10 @@ export default function Training() {
                       Reward: {Number(metric.avg_reward).toFixed(2)}
                     </div>
                     <div className="text-xs text-muted-foreground">
-                      ε={Number(metric.epsilon).toFixed(3)} | {metric.q_table_size} states
+                      L_total={Number(metric.l_total || 0).toFixed(4)} | ε={Number(metric.epsilon).toFixed(3)}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      α_imit={Number(metric.alpha_mix || 0).toFixed(2)} | {metric.q_table_size} states
                     </div>
                   </div>
                 </div>
