@@ -3,9 +3,109 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Plus, X, TrendingUp, TrendingDown } from "lucide-react";
+import { Plus, X } from "lucide-react";
 import { useWatchlistStore } from "@/store/watchlistStore";
 import { useUIStore } from "@/store/uiStore";
+import { useLatestQuote } from "@/lib/api/market";
+import { Value } from "@/components/Guard/Value";
+import { percentOrDash, currencyOrDash } from "@/lib/format";
+import { useSettingsStore } from "@/store/settingsStore";
+
+interface WatchlistRowProps {
+  symbol: string;
+  onSelect: () => void;
+  onRemove: () => void;
+}
+
+function WatchlistRow({ symbol, onSelect, onRemove }: WatchlistRowProps) {
+  const { data: quote, isLoading } = useLatestQuote(symbol);
+  const { dataMode } = useSettingsStore();
+
+  if (isLoading) {
+    return (
+      <tr className="animate-pulse">
+        <td className="whitespace-nowrap px-6 py-4">
+          <div className="h-4 w-16 bg-muted rounded"></div>
+        </td>
+        <td className="whitespace-nowrap px-6 py-4">
+          <div className="h-4 w-20 bg-muted rounded"></div>
+        </td>
+        <td className="whitespace-nowrap px-6 py-4">
+          <div className="h-4 w-24 bg-muted rounded"></div>
+        </td>
+        <td className="whitespace-nowrap px-6 py-4">
+          <div className="h-4 w-24 bg-muted rounded"></div>
+        </td>
+        <td className="whitespace-nowrap px-6 py-4">
+          <div className="h-4 w-16 bg-muted rounded"></div>
+        </td>
+        <td className="whitespace-nowrap px-6 py-4 text-right">
+          <div className="h-8 w-8 bg-muted rounded"></div>
+        </td>
+      </tr>
+    );
+  }
+
+  const source = dataMode === "mock" ? "mock" : "api";
+  const isPositive = quote && quote.changePercent >= 0;
+
+  return (
+    <tr
+      className="cursor-pointer transition-colors hover:bg-muted/50"
+      onClick={onSelect}
+    >
+      <td className="whitespace-nowrap px-6 py-4">
+        <div className="font-semibold">{symbol}</div>
+      </td>
+      <td className="whitespace-nowrap px-6 py-4">
+        <Value
+          value={quote?.price}
+          source={source}
+          formatter={(n) => currencyOrDash(n)}
+          className="data-cell"
+        />
+      </td>
+      <td className="whitespace-nowrap px-6 py-4">
+        <div
+          className={`data-cell ${
+            isPositive ? "profit" : "loss"
+          }`}
+        >
+          <Value
+            value={quote?.changePercent}
+            source={source}
+            formatter={(n) => percentOrDash(n)}
+          />
+        </div>
+      </td>
+      <td className="whitespace-nowrap px-6 py-4">
+        <Value
+          value={quote?.volume}
+          source={source}
+          formatter={(n) => n.toLocaleString()}
+          className="data-cell text-muted-foreground"
+        />
+      </td>
+      <td className="whitespace-nowrap px-6 py-4">
+        <Badge variant={quote ? "default" : "secondary"}>
+          {quote ? "active" : "idle"}
+        </Badge>
+      </td>
+      <td className="whitespace-nowrap px-6 py-4 text-right">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+        >
+          <X className="h-4 w-4" />
+        </Button>
+      </td>
+    </tr>
+  );
+}
 
 export default function Watchlist() {
   const [newSymbol, setNewSymbol] = useState("");
@@ -18,16 +118,6 @@ export default function Watchlist() {
       setNewSymbol("");
     }
   };
-
-  // Mock data for demonstration
-  const watchlistData = symbols.map((symbol) => ({
-    symbol,
-    price: (Math.random() * 500 + 100).toFixed(2),
-    change: (Math.random() * 10 - 5).toFixed(2),
-    changePercent: (Math.random() * 5 - 2.5).toFixed(2),
-    volume: (Math.random() * 10000000).toFixed(0),
-    status: Math.random() > 0.5 ? "active" : "idle",
-  }));
 
   return (
     <div className="space-y-6">
@@ -82,57 +172,14 @@ export default function Watchlist() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {watchlistData.map((item) => {
-                  const isPositive = parseFloat(item.change) >= 0;
-                  return (
-                    <tr
-                      key={item.symbol}
-                      className="cursor-pointer transition-colors hover:bg-muted/50"
-                      onClick={() => setActiveSymbol(item.symbol)}
-                    >
-                      <td className="whitespace-nowrap px-6 py-4">
-                        <div className="font-semibold">{item.symbol}</div>
-                      </td>
-                      <td className="whitespace-nowrap px-6 py-4">
-                        <div className="data-cell">${item.price}</div>
-                      </td>
-                      <td className="whitespace-nowrap px-6 py-4">
-                        <div className={`flex items-center gap-1 data-cell ${isPositive ? "profit" : "loss"}`}>
-                          {isPositive ? (
-                            <TrendingUp className="h-3 w-3" />
-                          ) : (
-                            <TrendingDown className="h-3 w-3" />
-                          )}
-                          {isPositive ? "+" : ""}
-                          {item.change} ({isPositive ? "+" : ""}
-                          {item.changePercent}%)
-                        </div>
-                      </td>
-                      <td className="whitespace-nowrap px-6 py-4">
-                        <div className="data-cell text-muted-foreground">
-                          {parseFloat(item.volume).toLocaleString()}
-                        </div>
-                      </td>
-                      <td className="whitespace-nowrap px-6 py-4">
-                        <Badge variant={item.status === "active" ? "default" : "secondary"}>
-                          {item.status}
-                        </Badge>
-                      </td>
-                      <td className="whitespace-nowrap px-6 py-4 text-right">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removeSymbol(item.symbol);
-                          }}
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {symbols.map((symbol) => (
+                  <WatchlistRow
+                    key={symbol}
+                    symbol={symbol}
+                    onSelect={() => setActiveSymbol(symbol)}
+                    onRemove={() => removeSymbol(symbol)}
+                  />
+                ))}
               </tbody>
             </table>
           </div>

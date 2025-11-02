@@ -12,10 +12,9 @@ import {
   Activity,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { useUIStore } from "@/store/uiStore";
-import { useConnectionStore } from "@/store/connectionStore";
+import { DataModeBadge } from "@/components/DataModeBadge";
 
 const navigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
@@ -34,7 +33,6 @@ interface DashboardLayoutProps {
 export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const location = useLocation();
   const { sidebarCollapsed, toggleSidebar } = useUIStore();
-  const { wsStatus } = useConnectionStore();
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background">
@@ -99,16 +97,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
           </div>
 
           <div className="flex items-center gap-4">
-            <Badge
-              variant={wsStatus === "connected" ? "default" : "destructive"}
-              className={cn(
-                "text-xs",
-                wsStatus === "connected" && "bg-success hover:bg-success/90"
-              )}
-            >
-              <div className={cn("mr-1.5 h-2 w-2 rounded-full", wsStatus === "connected" ? "bg-white animate-pulse" : "bg-white")} />
-              {wsStatus === "connected" ? "Connected" : "Disconnected"}
-            </Badge>
+            <DataModeBadge />
           </div>
         </header>
 
