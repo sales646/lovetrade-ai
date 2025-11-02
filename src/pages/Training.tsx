@@ -5,7 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { Brain, Zap, TrendingUp, Activity, Cpu, Target, Play, Pause, Database, RefreshCw } from "lucide-react";
+import { Brain, Zap, TrendingUp, Activity, Cpu, Target, Play, Pause, Database, RefreshCw, AlertCircle } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useStartAutonomousTraining, useRLMetrics, useQState } from "@/lib/api/autonomous-training";
 import { useGenerateTrainingData } from "@/lib/api/data-generation";
 import { useLocalGPUTrainingStatus } from "@/lib/api/training";
@@ -529,6 +530,21 @@ export default function Training() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
+          {/* Setup Warning */}
+          <Alert variant="destructive" className="border-2">
+            <AlertCircle className="h-5 w-5" />
+            <AlertTitle className="text-base">⚠️ Setup Required First!</AlertTitle>
+            <AlertDescription className="mt-2 space-y-2">
+              <p className="font-semibold">Before running any .bat files, install Python dependencies:</p>
+              <div className="bg-background/80 rounded p-3 font-mono text-xs space-y-1">
+                <div>1. Open terminal in <code className="bg-muted px-1 py-0.5 rounded">python_training</code> folder</div>
+                <div>2. Run: <code className="bg-muted px-2 py-0.5 rounded">pip install -r requirements.txt</code></div>
+                <div>3. Verify GPU: <code className="bg-muted px-2 py-0.5 rounded">python check_gpu.py</code></div>
+              </div>
+              <p className="text-xs mt-2">Common error: "ModuleNotFoundError: No module named 'numpy'" means you skipped this step!</p>
+            </AlertDescription>
+          </Alert>
+
           {/* GPU Status & Stats */}
           <div className="rounded-lg border-2 border-primary/30 bg-gradient-to-br from-primary/10 to-primary/5 p-6">
             <div className="flex items-center justify-between mb-4">
