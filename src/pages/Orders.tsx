@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
 import {
   Select,
   SelectContent,
@@ -13,9 +14,10 @@ import {
 } from "@/components/ui/select";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useLatestQuote } from "@/lib/api/market";
+import { assessTradeRisk, RiskAssessment } from "@/lib/api/risk";
 import { Value } from "@/components/Guard/Value";
 import { currencyOrDash, percentOrDash } from "@/lib/format";
-import { TrendingUp, TrendingDown, X } from "lucide-react";
+import { TrendingUp, TrendingDown, Shield, AlertTriangle, CheckCircle } from "lucide-react";
 import { toast } from "sonner";
 
 // Mock positions for demo
@@ -58,6 +60,8 @@ export default function Orders() {
   const [riskPercent, setRiskPercent] = useState(riskDefaults.riskPerTrade.toString());
   const [stopLoss, setStopLoss] = useState("");
   const [takeProfit, setTakeProfit] = useState("");
+  const [riskAssessment, setRiskAssessment] = useState<RiskAssessment | null>(null);
+  const [isAssessing, setIsAssessing] = useState(false);
 
   const { data: quoteResult } = useLatestQuote(symbol || null);
   const quote = quoteResult?.data;
@@ -82,17 +86,82 @@ export default function Orders() {
       ? (potentialProfit / riskPerShare).toFixed(2)
       : "—";
 
+  const handleAssessRisk = async () => {
+    if (!symbol || !quote) {
+      toast.error("Please enter a valid symbol first");
+      return;
+    }
+
+    setIsAssessing(true);
+    try {
+      // Get current time context (mock for now)
+      const now = new Date();
+      const marketOpen = new Date(now);
+      marketOpen.setHours(9, 30, 0, 0);
+      const marketClose = new Date(now);
+      marketClose.setHours(16, 0, 0, 0);
+      
+      const minutesSinceOpen = Math.max(0, Math.floor((now.getTime() - marketOpen.getTime()) / 60000));
+      const minutesUntilClose = Math.max(0, Math.floor((marketClose.getTime() - now.getTime()) / 60000));
+
+      const assessment = await assessTradeRisk({
+        symbol,
+        action: side,
+        proposedSize: parseFloat(quantity || "0"),
+        marketData: {
+          price: quote.price,
+          rsi: 50 + (Math.random() - 0.5) * 40, // Mock RSI
+          atr: quote.price * 0.02, // Mock ATR
+          vwap: quote.price * (1 + (Math.random() - 0.5) * 0.01), // Mock VWAP
+          vwapDeviation: (Math.random() - 0.5) * 2,
+          volumeZScore: (Math.random() - 0.5) * 3,
+          sentiment: (Math.random() - 0.5) * 2,
+          recentVolatility: Math.abs(quote.changePercent),
+        },
+        timeContext: {
+          minutesSinceOpen,
+          minutesUntilClose,
+        },
+      });
+
+      setRiskAssessment(assessment);
+      
+      if (!assessment.shouldExecute) {
+        toast.error(assessment.reason);
+      } else if (assessment.adjustedSize < parseFloat(quantity || "0")) {
+        toast.warning(assessment.reason);
+      } else {
+        toast.success(assessment.reason);
+      }
+    } catch (error) {
+      toast.error("Risk assessment failed");
+      console.error(error);
+    } finally {
+      setIsAssessing(false);
+    }
+  };
+
   const handleSubmitOrder = () => {
     if (!symbol || !quantity) {
       toast.error("Please fill in all required fields");
       return;
     }
 
+    if (!riskAssessment) {
+      toast.error("Please assess risk before submitting order");
+      return;
+    }
+
+    if (!riskAssessment.shouldExecute) {
+      toast.error("Order blocked by risk assessment");
+      return;
+    }
+
+    const finalSize = riskAssessment.adjustedSize;
+
     // Mock order submission
-    toast.success(`${side.toUpperCase()} order for ${quantity} ${symbol} submitted`, {
-      description: `Type: ${orderType}, ${
-        orderType === "limit" ? `Price: $${limitPrice}` : "Market Price"
-      }`,
+    toast.success(`${side.toUpperCase()} order for ${finalSize.toFixed(0)} ${symbol} submitted`, {
+      description: `Type: ${orderType}, Risk: ${(riskAssessment.riskScore * 100).toFixed(0)}%`,
     });
 
     // Reset form
@@ -101,6 +170,7 @@ export default function Orders() {
     setLimitPrice("");
     setStopLoss("");
     setTakeProfit("");
+    setRiskAssessment(null);
   };
 
   const handleClosePosition = (positionId: string, symbol: string) => {
@@ -272,7 +342,70 @@ export default function Orders() {
                 </div>
               </div>
 
-              <Button onClick={handleSubmitOrder} className="w-full" size="lg">
+              {/* Risk Assessment */}
+              {riskAssessment && (
+                <div className="rounded-lg border border-border p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium">Risk Assessment</span>
+                    {riskAssessment.shouldExecute ? (
+                      riskAssessment.riskScore < 0.5 ? (
+                        <CheckCircle className="h-5 w-5 text-green-500" />
+                      ) : (
+                        <AlertTriangle className="h-5 w-5 text-yellow-500" />
+                      )
+                    ) : (
+                      <Shield className="h-5 w-5 text-red-500" />
+                    )}
+                  </div>
+                  
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span>Overall Risk</span>
+                      <span className={`font-medium ${
+                        riskAssessment.riskScore > 0.7 ? "text-red-500" :
+                        riskAssessment.riskScore > 0.5 ? "text-yellow-500" :
+                        "text-green-500"
+                      }`}>
+                        {(riskAssessment.riskScore * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <Progress 
+                      value={riskAssessment.riskScore * 100}
+                      className="h-2"
+                    />
+                  </div>
+
+                  <div className="text-xs text-muted-foreground">
+                    {riskAssessment.reason}
+                  </div>
+
+                  {riskAssessment.adjustedSize !== parseFloat(quantity || "0") && (
+                    <div className="text-sm">
+                      <span className="text-muted-foreground">Adjusted Size: </span>
+                      <span className="font-medium text-yellow-500">
+                        {riskAssessment.adjustedSize.toFixed(0)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <Button 
+                onClick={handleAssessRisk} 
+                className="w-full" 
+                variant="outline"
+                disabled={!symbol || isAssessing}
+              >
+                <Shield className="mr-2 h-4 w-4" />
+                {isAssessing ? "Assessing..." : "Assess Risk"}
+              </Button>
+
+              <Button 
+                onClick={handleSubmitOrder} 
+                className="w-full" 
+                size="lg"
+                disabled={!riskAssessment || !riskAssessment.shouldExecute}
+              >
                 Place {side.toUpperCase()} Order
               </Button>
             </div>
