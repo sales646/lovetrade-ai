@@ -160,34 +160,93 @@ function selectAction(stateKey: string, qState: QState): number {
   }
 }
 
-function calculateReward(action: number, marketMove: number, holdTime: number): number {
-  // Reward function that encourages trading with small incentives
+// Simulate a realistic trade with stops, targets, fees, and slippage
+function simulateTradeOutcome(
+  bars: any[],
+  entryIndex: number,
+  side: "BUY" | "SELL",
+  atr: number,
+  maxHoldBars: number = 12
+) {
+  const entryBar = bars[entryIndex];
+  const entryPrice = Number(entryBar.close);
   
-  // Base reward from market move
-  let reward = 0;
+  // AGGRESSIVE risk management parameters
+  const stopLossDistance = atr * 1.5; // Tighter 1.5x ATR stop
+  const takeProfitDistance = atr * 6; // Bigger 6x ATR target = 4:1 R:R
+  const slippagePct = 0.08; // More slippage from aggressive entries
+  const feesPct = 0.12; // Slightly higher fees from more trading
   
-  if (action === 0) {
-    // SELL action: profit from downward moves
-    reward = -marketMove * 100; // Profit when price drops
-  } else if (action === 2) {
-    // BUY action: profit from upward moves  
-    reward = marketMove * 100; // Profit when price rises
-  } else {
-    // HOLD action: small penalty to encourage trading
-    reward = -0.05; // Small penalty for inaction
+  const stopLossPrice = side === "BUY" 
+    ? entryPrice - stopLossDistance 
+    : entryPrice + stopLossDistance;
+  
+  const takeProfitPrice = side === "BUY" 
+    ? entryPrice + takeProfitDistance 
+    : entryPrice - takeProfitDistance;
+  
+  // Walk forward through bars to find exit
+  let exitPrice = entryPrice;
+  let exitReason = "TIME"; // TIME, STOP_LOSS, TAKE_PROFIT
+  let barsHeld = 0;
+  
+  for (let i = entryIndex + 1; i < Math.min(entryIndex + maxHoldBars + 1, bars.length); i++) {
+    const bar = bars[i];
+    barsHeld++;
+    
+    if (side === "BUY") {
+      // Check if stop loss hit
+      if (Number(bar.low) <= stopLossPrice) {
+        exitPrice = stopLossPrice;
+        exitReason = "STOP_LOSS";
+        break;
+      }
+      // Check if take profit hit
+      if (Number(bar.high) >= takeProfitPrice) {
+        exitPrice = takeProfitPrice;
+        exitReason = "TAKE_PROFIT";
+        break;
+      }
+    } else { // SELL
+      // Check if stop loss hit
+      if (Number(bar.high) >= stopLossPrice) {
+        exitPrice = stopLossPrice;
+        exitReason = "STOP_LOSS";
+        break;
+      }
+      // Check if take profit hit
+      if (Number(bar.low) <= takeProfitPrice) {
+        exitPrice = takeProfitPrice;
+        exitReason = "TAKE_PROFIT";
+        break;
+      }
+    }
+    
+    // Aggressive time-based exit
+    if (barsHeld >= maxHoldBars) {
+      exitPrice = Number(bar.close);
+      exitReason = "TIME";
+      break;
+    }
   }
   
-  // Additional small reward for taking action (not holding)
-  if (action !== 1) {
-    reward += 0.1; // Small bonus for trading
-  }
+  // Calculate P&L
+  let grossPnlPct = side === "BUY"
+    ? ((exitPrice - entryPrice) / entryPrice) * 100
+    : ((entryPrice - exitPrice) / entryPrice) * 100;
   
-  // Penalty for holding too long
-  if (action === 1 && holdTime > 10) {
-    reward -= 0.1 * (holdTime - 10); // Increasing penalty
-  }
+  // Apply slippage and fees
+  const netPnlPct = grossPnlPct - slippagePct - feesPct;
   
-  return reward;
+  // Aggressive reward scaling: +5% = +1.5 reward, -2.5% = -0.75 reward
+  const reward = netPnlPct / 3.3;
+  
+  return {
+    reward,
+    pnl_pct: netPnlPct,
+    exit_reason: exitReason,
+    bars_held: barsHeld,
+  };
 }
 
 async function runSimulationEpisode(qState: QState, symbol: string) {
@@ -199,10 +258,10 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
     .select("*")
     .eq("symbol", symbol)
     .eq("timeframe", "5m")
-    .order("timestamp", { ascending: false })
+    .order("timestamp", { ascending: true }) // IMPORTANT: ascending for forward simulation
     .limit(100);
   
-  if (!bars || bars.length < 2) {
+  if (!bars || bars.length < 20) {
     await log("WARN", "Not enough historical data for simulation");
     return { 
       reward: 0, 
@@ -215,22 +274,19 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
     };
   }
   
-  // Load expert trajectories for imitation (50% of batch)
+  // Load expert trajectories for imitation
   const expertTrajectories = await loadExpertTrajectories(symbol, 50);
   
   let totalReward = 0;
   let steps = 0;
-  let position = 1; // Start with HOLD
-  let holdTime = 0;
   let lossRL = 0;
   let lossImitation = 0;
   let actionCounts = { buy: 0, sell: 0, hold: 0 };
   let expertCorrectCounts: Record<string, { correct: number; total: number }> = {};
   
-  // Simulate through historical bars
-  for (let i = 0; i < bars.length - 1; i++) {
+  // Simulate through historical bars with REAL trade outcomes
+  for (let i = 0; i < bars.length - 15; i++) { // Leave room for trade to complete
     const currentBar = bars[i];
-    const nextBar = bars[i + 1];
     
     // Get technical indicators for state
     const { data: indicators } = await supabase
@@ -238,11 +294,12 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       .select("*")
       .eq("symbol", symbol)
       .eq("timeframe", "5m")
-      .gte("timestamp", currentBar.timestamp)
+      .lte("timestamp", currentBar.timestamp)
+      .order("timestamp", { ascending: false })
       .limit(1)
-      .single();
+      .maybeSingle();
     
-    if (!indicators) continue;
+    if (!indicators || !indicators.atr_14) continue;
     
     const stateKey = getStateKey(indicators);
     
@@ -252,46 +309,106 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
     }
     
     // Select action using epsilon-greedy
-    const action = selectAction(stateKey, qState);
+    const actionIdx = selectAction(stateKey, qState);
     
-    // Calculate market move
-    const marketMove = (Number(nextBar.close) - Number(currentBar.close)) / Number(currentBar.close);
+    let reward = 0;
+    let nextStateKey = stateKey;
     
-    // Track hold time
-    if (action === 1) {
-      holdTime++;
+    // Track action distribution
+    if (actionIdx === 0) {
+      actionCounts.sell++;
+      // SELL trade: simulate short position
+      const tradeResult = simulateTradeOutcome(
+        bars,
+        i,
+        "SELL",
+        Number(indicators.atr_14),
+        12 // max hold bars
+      );
+      reward = tradeResult.reward;
+      totalReward += reward;
+      
+      // Get state after trade completes
+      const exitIdx = Math.min(i + tradeResult.bars_held, bars.length - 1);
+      const { data: nextIndicators } = await supabase
+        .from("technical_indicators")
+        .select("*")
+        .eq("symbol", symbol)
+        .eq("timeframe", "5m")
+        .lte("timestamp", bars[exitIdx].timestamp)
+        .order("timestamp", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      
+      if (nextIndicators) {
+        nextStateKey = getStateKey(nextIndicators);
+      }
+      
+      // Skip ahead past this trade
+      i += tradeResult.bars_held;
+      
+    } else if (actionIdx === 2) {
+      actionCounts.buy++;
+      // BUY trade: simulate long position
+      const tradeResult = simulateTradeOutcome(
+        bars,
+        i,
+        "BUY",
+        Number(indicators.atr_14),
+        12 // max hold bars
+      );
+      reward = tradeResult.reward;
+      totalReward += reward;
+      
+      // Get state after trade completes
+      const exitIdx = Math.min(i + tradeResult.bars_held, bars.length - 1);
+      const { data: nextIndicators } = await supabase
+        .from("technical_indicators")
+        .select("*")
+        .eq("symbol", symbol)
+        .eq("timeframe", "5m")
+        .lte("timestamp", bars[exitIdx].timestamp)
+        .order("timestamp", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      
+      if (nextIndicators) {
+        nextStateKey = getStateKey(nextIndicators);
+      }
+      
+      // Skip ahead past this trade
+      i += tradeResult.bars_held;
+      
     } else {
-      holdTime = 0;
+      actionCounts.hold++;
+      // HOLD: small penalty, move to next bar
+      reward = -0.05;
+      totalReward += reward;
+      
+      if (i + 1 < bars.length) {
+        const { data: nextIndicators } = await supabase
+          .from("technical_indicators")
+          .select("*")
+          .eq("symbol", symbol)
+          .eq("timeframe", "5m")
+          .lte("timestamp", bars[i + 1].timestamp)
+          .order("timestamp", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        
+        if (nextIndicators) {
+          nextStateKey = getStateKey(nextIndicators);
+        }
+      }
     }
     
-    // Calculate reward
-    const reward = calculateReward(action, marketMove, holdTime);
-    totalReward += reward;
-    
-    // Get next state
-    const { data: nextIndicators } = await supabase
-      .from("technical_indicators")
-      .select("*")
-      .eq("symbol", symbol)
-      .eq("timeframe", "5m")
-      .gte("timestamp", nextBar.timestamp)
-      .limit(1)
-      .single();
-    
-    if (!nextIndicators) continue;
-    
-    const nextStateKey = getStateKey(nextIndicators);
+    // Initialize next state Q-values if needed
     if (!qState.q_table[nextStateKey]) {
       qState.q_table[nextStateKey] = [0, 0, 0];
     }
     
-    // Track action distribution
-    if (action === 0) actionCounts.sell++;
-    else if (action === 1) actionCounts.hold++;
-    else actionCounts.buy++;
-    
     // Standard Q-Learning update (RL loss)
-    const currentQ = qState.q_table[stateKey][action];
+    const currentQ = qState.q_table[stateKey][actionIdx];
     const maxNextQ = Math.max(...qState.q_table[nextStateKey]);
     const tdError = reward + qState.gamma * maxNextQ - currentQ;
     const newQ = currentQ + qState.alpha * tdError;
@@ -299,7 +416,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
     // RL loss (TD error squared)
     lossRL += tdError * tdError;
     
-    qState.q_table[stateKey][action] = newQ;
+    qState.q_table[stateKey][actionIdx] = newQ;
     
     steps++;
   }
