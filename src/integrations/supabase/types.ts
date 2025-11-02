@@ -440,6 +440,72 @@ export type Database = {
           },
         ]
       }
+      rl_q_state: {
+        Row: {
+          alpha: number
+          episode_count: number
+          epsilon: number
+          gamma: number
+          id: number
+          q_table: Json
+          updated_at: string
+        }
+        Insert: {
+          alpha?: number
+          episode_count?: number
+          epsilon?: number
+          gamma?: number
+          id?: number
+          q_table?: Json
+          updated_at?: string
+        }
+        Update: {
+          alpha?: number
+          episode_count?: number
+          epsilon?: number
+          gamma?: number
+          id?: number
+          q_table?: Json
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      rl_training_metrics: {
+        Row: {
+          avg_reward: number
+          avg_steps: number
+          created_at: string
+          duration_seconds: number
+          episodes: number
+          epsilon: number
+          id: string
+          q_table_size: number
+          total_episodes: number
+        }
+        Insert: {
+          avg_reward: number
+          avg_steps: number
+          created_at?: string
+          duration_seconds: number
+          episodes: number
+          epsilon: number
+          id?: string
+          q_table_size: number
+          total_episodes: number
+        }
+        Update: {
+          avg_reward?: number
+          avg_steps?: number
+          created_at?: string
+          duration_seconds?: number
+          episodes?: number
+          epsilon?: number
+          id?: string
+          q_table_size?: number
+          total_episodes?: number
+        }
+        Relationships: []
+      }
       signal_correlations: {
         Row: {
           correlation: number

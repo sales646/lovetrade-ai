@@ -1,63 +1,75 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Brain, Database, Download, TrendingUp, BarChart3, Activity, Zap, Target } from "lucide-react";
-import { useFetchMarketData, useStoredSymbols } from "@/lib/api/historical";
-import { useComputeIndicators, useGenerateTrajectories, useTrajectoryStats, useTrainingRuns } from "@/lib/api/training";
-import { useWatchlistStore } from "@/store/watchlistStore";
+import { Progress } from "@/components/ui/progress";
+import { Brain, Zap, TrendingUp, Activity, Cpu, Target, Play, Pause } from "lucide-react";
+import { useStartAutonomousTraining, useRLMetrics, useQState } from "@/lib/api/autonomous-training";
+import { Line } from "recharts";
+import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
 import { toast } from "sonner";
 
 export default function Training() {
-  const [selectedSymbol, setSelectedSymbol] = useState("");
-  const [period, setPeriod] = useState("1y");
-  const [interval, setInterval] = useState("5m");
+  const [iterations, setIterations] = useState(10);
+  const [isAutoRunning, setIsAutoRunning] = useState(false);
+  const [autoIntervalId, setAutoIntervalId] = useState<number | null>(null);
   
-  const { symbols } = useWatchlistStore();
-  const { data: storedSymbols } = useStoredSymbols();
-  const { data: trajectoryStats } = useTrajectoryStats();
-  const { data: trainingRuns } = useTrainingRuns();
-  
-  const fetchMarketData = useFetchMarketData();
-  const computeIndicators = useComputeIndicators();
-  const generateTrajectories = useGenerateTrajectories();
+  const startTraining = useStartAutonomousTraining();
+  const { data: metrics } = useRLMetrics();
+  const { data: qState } = useQState();
 
-  const handlePrepareData = async () => {
-    if (!selectedSymbol) {
-      toast.error("Please select a symbol");
-      return;
-    }
-
-    toast.info("Starting full pipeline...");
-    
-    // Step 1: Fetch OHLCV data
-    await fetchMarketData.mutateAsync({
-      symbol: selectedSymbol,
-      period,
-      interval,
-    });
-
-    // Step 2: Compute technical indicators
-    await computeIndicators.mutateAsync({
-      symbol: selectedSymbol,
-      timeframe: interval,
-    });
-
-    // Step 3: Generate expert trajectories
-    await generateTrajectories.mutateAsync({
-      symbol: selectedSymbol,
-      timeframe: interval,
-    });
-
-    toast.success("Data pipeline complete!");
+  const handleStartTraining = () => {
+    startTraining.mutate(iterations);
   };
 
-  const totalBars = storedSymbols?.reduce((sum, s) => sum + (s.last_fetched ? 1 : 0), 0) || 0;
-  const totalTrajectories = trajectoryStats?.total || 0;
-  const totalRuns = trainingRuns?.length || 0;
+  const handleToggleAutoTraining = () => {
+    if (isAutoRunning) {
+      // Stop auto training
+      if (autoIntervalId) {
+        clearInterval(autoIntervalId);
+        setAutoIntervalId(null);
+      }
+      setIsAutoRunning(false);
+      toast.info("🛑 Autonomous training stopped");
+    } else {
+      // Start auto training
+      toast.success("🚀 Autonomous training started - running every 60 seconds");
+      setIsAutoRunning(true);
+      
+      // Run immediately
+      startTraining.mutate(iterations);
+      
+      // Then run every 60 seconds
+      const id = window.setInterval(() => {
+        startTraining.mutate(iterations);
+      }, 60000);
+      
+      setAutoIntervalId(id);
+    }
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (autoIntervalId) {
+        clearInterval(autoIntervalId);
+      }
+    };
+  }, [autoIntervalId]);
+
+  const latestMetric = metrics?.[0];
+  const totalEpisodes = qState?.episode_count || 0;
+  const epsilon = qState?.epsilon || 0;
+  const qTableSize = qState?.q_table ? Object.keys(qState.q_table).length : 0;
+
+  // Prepare chart data
+  const chartData = metrics?.slice(0, 20).reverse().map((m, i) => ({
+    episode: totalEpisodes - metrics.length + i + 1,
+    reward: Number(m.avg_reward),
+    epsilon: Number(m.epsilon),
+  })) || [];
 
   return (
     <div className="space-y-6">
@@ -69,9 +81,9 @@ export default function Training() {
             <Brain className="h-8 w-8 text-primary" />
           </div>
           <div>
-            <h2 className="mb-2 text-3xl font-bold">Model Training</h2>
+            <h2 className="mb-2 text-3xl font-bold">Autonomous RL Training</h2>
             <p className="text-muted-foreground">
-              Download and prepare historical market data for ML model training
+              Continuous Q-Learning with epsilon-greedy exploration and reward shaping
             </p>
           </div>
         </div>
@@ -81,290 +93,235 @@ export default function Training() {
       <div className="grid gap-4 md:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Stored Symbols</CardTitle>
-            <Database className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{storedSymbols?.length || 0}</div>
-            <p className="text-xs text-muted-foreground">With historical data</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Data Points</CardTitle>
-            <BarChart3 className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{totalBars > 0 ? "~" + (totalBars * 100).toLocaleString() : "—"}</div>
-            <p className="text-xs text-muted-foreground">Historical bars</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Trajectories</CardTitle>
-            <Target className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{totalTrajectories.toLocaleString()}</div>
-            <p className="text-xs text-muted-foreground">Expert signals</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Training Runs</CardTitle>
+            <CardTitle className="text-sm font-medium">Total Episodes</CardTitle>
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{totalRuns}</div>
-            <p className="text-xs text-muted-foreground">BC + PPO runs</p>
+            <div className="text-2xl font-bold">{totalEpisodes.toLocaleString()}</div>
+            <p className="text-xs text-muted-foreground">Training iterations</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Avg Reward</CardTitle>
+            <TrendingUp className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {latestMetric ? Number(latestMetric.avg_reward).toFixed(2) : "—"}
+            </div>
+            <p className="text-xs text-muted-foreground">Latest episode</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Exploration (ε)</CardTitle>
+            <Target className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{(epsilon * 100).toFixed(1)}%</div>
+            <Progress value={epsilon * 100} className="mt-2" />
+            <p className="text-xs text-muted-foreground mt-1">
+              {epsilon > 0.2 ? "High exploration" : epsilon > 0.1 ? "Balanced" : "Exploitation focused"}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Q-Table Size</CardTitle>
+            <Cpu className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{qTableSize.toLocaleString()}</div>
+            <p className="text-xs text-muted-foreground">Unique states</p>
           </CardContent>
         </Card>
       </div>
 
-      {/* Pipeline */}
+      {/* Training Control */}
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Zap className="h-5 w-5 text-primary" />
-            RL Training Pipeline
-          </CardTitle>
-          <CardDescription>
-            Full pipeline: Fetch data → Compute indicators → Generate expert trajectories → Train models
-          </CardDescription>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Zap className="h-5 w-5 text-primary" />
+                Training Controls
+              </CardTitle>
+              <CardDescription>
+                Start manual training sessions or enable fully autonomous mode
+              </CardDescription>
+            </div>
+            {isAutoRunning && (
+              <Badge variant="default" className="animate-pulse">
+                <Activity className="mr-1 h-3 w-3" />
+                Auto-Running
+              </Badge>
+            )}
+          </div>
         </CardHeader>
         <CardContent>
-          <Tabs defaultValue="prepare">
-            <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="prepare">1. Prepare Data</TabsTrigger>
-              <TabsTrigger value="train">2. Train Models</TabsTrigger>
-            </TabsList>
-            
-            <TabsContent value="prepare" className="space-y-6">
-              <div className="grid gap-4 md:grid-cols-4">
-                <div className="space-y-2">
-                  <Label>Symbol</Label>
-                  <Select value={selectedSymbol} onValueChange={setSelectedSymbol}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select symbol" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {symbols.map((symbol) => (
-                        <SelectItem key={symbol} value={symbol}>
-                          {symbol}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+          <div className="space-y-6">
+            {/* Manual Training */}
+            <div className="space-y-4">
+              <div className="flex items-center gap-4">
+                <div className="flex-1">
+                  <Label htmlFor="iterations">Episodes per run</Label>
+                  <Input
+                    id="iterations"
+                    type="number"
+                    min="1"
+                    max="100"
+                    value={iterations}
+                    onChange={(e) => setIterations(parseInt(e.target.value) || 10)}
+                    disabled={isAutoRunning}
+                  />
                 </div>
-
-                <div className="space-y-2">
-                  <Label>Period</Label>
-                  <Select value={period} onValueChange={setPeriod}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="1mo">1 Month</SelectItem>
-                      <SelectItem value="3mo">3 Months</SelectItem>
-                      <SelectItem value="6mo">6 Months</SelectItem>
-                      <SelectItem value="1y">1 Year</SelectItem>
-                      <SelectItem value="2y">2 Years</SelectItem>
-                      <SelectItem value="3y">3 Years</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="space-y-2">
-                  <Label>Interval</Label>
-                  <Select value={interval} onValueChange={setInterval}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="1m">1 Minute</SelectItem>
-                      <SelectItem value="5m">5 Minutes</SelectItem>
-                      <SelectItem value="15m">15 Minutes</SelectItem>
-                      <SelectItem value="1h">1 Hour</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="flex items-end">
+                <div className="flex-1 flex items-end">
                   <Button 
-                    onClick={handlePrepareData} 
-                    disabled={!selectedSymbol || fetchMarketData.isPending || computeIndicators.isPending || generateTrajectories.isPending}
+                    onClick={handleStartTraining}
+                    disabled={startTraining.isPending || isAutoRunning}
                     className="w-full"
                   >
-                    {(fetchMarketData.isPending || computeIndicators.isPending || generateTrajectories.isPending) ? "Processing..." : "Run Pipeline"}
+                    <Play className="mr-2 h-4 w-4" />
+                    {startTraining.isPending ? "Training..." : "Run Training"}
                   </Button>
                 </div>
               </div>
+            </div>
 
-              <div className="space-y-2 pt-4 border-t border-border">
-                <h4 className="text-sm font-medium">Pipeline Steps:</h4>
-                <div className="grid gap-2 text-sm">
-                  <div className="flex items-center gap-2 text-muted-foreground">
-                    <div className="h-2 w-2 rounded-full bg-primary" />
-                    <span>1. Fetch OHLCV data from Yahoo Finance</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-muted-foreground">
-                    <div className="h-2 w-2 rounded-full bg-primary" />
-                    <span>2. Compute technical indicators (RSI, ATR, EMA, VWAP, etc.)</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-muted-foreground">
-                    <div className="h-2 w-2 rounded-full bg-primary" />
-                    <span>3. Generate expert trajectories from 10+ strategies</span>
-                  </div>
-                </div>
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t" />
               </div>
-            </TabsContent>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-card px-2 text-muted-foreground">Or</span>
+              </div>
+            </div>
 
-            <TabsContent value="train" className="space-y-4">
-              <div className="rounded-lg border border-border bg-muted/50 p-6 text-center">
-                <Brain className="h-12 w-12 mx-auto mb-3 text-muted-foreground" />
-                <h3 className="font-semibold mb-2">Model Training (Coming Soon)</h3>
-                <p className="text-sm text-muted-foreground mb-4">
-                  Behavior Cloning (BC) warm-start followed by PPO fine-tuning with:
-                </p>
-                <div className="grid gap-2 text-sm text-left max-w-md mx-auto">
-                  <div className="flex items-center gap-2">
-                    <div className="h-1.5 w-1.5 rounded-full bg-primary" />
-                    <span>Weighted cross-entropy loss (emphasize HOLD + high R:R)</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="h-1.5 w-1.5 rounded-full bg-primary" />
-                    <span>PPO with reward = Δequity - fees - λ·risk</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="h-1.5 w-1.5 rounded-full bg-primary" />
-                    <span>Walk-forward validation with purged CV</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="h-1.5 w-1.5 rounded-full bg-primary" />
-                    <span>Metrics: Sharpe, profit factor, win rate, max DD</span>
-                  </div>
+            {/* Autonomous Mode */}
+            <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="font-semibold mb-1">🤖 Fully Autonomous Mode</h4>
+                  <p className="text-sm text-muted-foreground">
+                    Runs {iterations} episodes every 60 seconds continuously
+                  </p>
                 </div>
+                <Button
+                  onClick={handleToggleAutoTraining}
+                  variant={isAutoRunning ? "destructive" : "default"}
+                  disabled={startTraining.isPending}
+                >
+                  {isAutoRunning ? (
+                    <>
+                      <Pause className="mr-2 h-4 w-4" />
+                      Stop Auto
+                    </>
+                  ) : (
+                    <>
+                      <Play className="mr-2 h-4 w-4" />
+                      Start Auto
+                    </>
+                  )}
+                </Button>
               </div>
-            </TabsContent>
-          </Tabs>
+            </div>
+
+            {/* Info Box */}
+            <div className="rounded-lg border border-border bg-muted/50 p-4">
+              <h4 className="font-semibold mb-2">How it works:</h4>
+              <ul className="space-y-1 text-sm text-muted-foreground">
+                <li className="flex items-start gap-2">
+                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
+                  <span><strong>Q-Learning:</strong> Learns optimal actions for each market state</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
+                  <span><strong>Epsilon-greedy:</strong> Balances exploration (random) vs exploitation (best known)</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
+                  <span><strong>Reward shaping:</strong> +0.1 bonus for trading, -0.05 penalty for holding, extra penalty for long holds</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
+                  <span><strong>Continuous learning:</strong> Improves over time, epsilon decays from 30% to 5% over 1000 episodes</span>
+                </li>
+              </ul>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
-      {/* Expert Trajectories Stats */}
-      {trajectoryStats && trajectoryStats.total > 0 && (
+      {/* Training Progress Chart */}
+      {chartData.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Expert Trajectories</CardTitle>
-            <CardDescription>Signals generated from rule-based strategies</CardDescription>
+            <CardTitle>Training Progress</CardTitle>
+            <CardDescription>Average reward and exploration rate over recent episodes</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-              {Object.entries(trajectoryStats.byTactic).map(([tactic, stats]) => (
-                <div
-                  key={tactic}
-                  className="rounded-lg border border-border bg-muted/50 p-4"
-                >
-                  <div className="font-semibold text-sm mb-2">{tactic.replace(/_/g, " ")}</div>
-                  <div className="grid grid-cols-4 gap-2 text-xs">
-                    <div>
-                      <div className="text-muted-foreground">Total</div>
-                      <div className="font-semibold">{stats.total}</div>
-                    </div>
-                    <div>
-                      <div className="text-success">Buy</div>
-                      <div className="font-semibold">{stats.buy}</div>
-                    </div>
-                    <div>
-                      <div className="text-destructive">Sell</div>
-                      <div className="font-semibold">{stats.sell}</div>
-                    </div>
-                    <div>
-                      <div className="text-muted-foreground">Hold</div>
-                      <div className="font-semibold">{stats.hold}</div>
-                    </div>
-                  </div>
-                </div>
-              ))}
+            <div className="h-[300px]">
+              <ChartContainer
+                config={{
+                  reward: { label: "Avg Reward", color: "hsl(var(--primary))" },
+                  epsilon: { label: "Epsilon", color: "hsl(var(--destructive))" },
+                }}
+              >
+                <Line
+                  data={chartData}
+                  dataKey="reward"
+                  stroke="var(--color-reward)"
+                  strokeWidth={2}
+                />
+                <ChartTooltip />
+              </ChartContainer>
             </div>
           </CardContent>
         </Card>
       )}
 
-      {/* Stored Data */}
+      {/* Recent Training Runs */}
       <Card>
         <CardHeader>
-          <CardTitle>Downloaded Datasets</CardTitle>
-          <CardDescription>Historical data ready for model training</CardDescription>
+          <CardTitle>Recent Training Sessions</CardTitle>
+          <CardDescription>Latest autonomous training episodes</CardDescription>
         </CardHeader>
         <CardContent>
-          {storedSymbols && storedSymbols.length > 0 ? (
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-              {storedSymbols.map((symbol) => (
+          {metrics && metrics.length > 0 ? (
+            <div className="space-y-2">
+              {metrics.slice(0, 10).map((metric) => (
                 <div
-                  key={symbol.symbol}
-                  className="flex items-center justify-between rounded-lg border border-border bg-muted/50 p-4"
+                  key={metric.id}
+                  className="flex items-center justify-between rounded-lg border border-border bg-muted/50 p-3"
                 >
                   <div>
-                    <div className="font-semibold">{symbol.symbol}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {symbol.exchange || "Unknown Exchange"}
+                    <div className="text-sm font-medium">
+                      {metric.episodes} episodes
                     </div>
-                    {symbol.last_fetched && (
-                      <div className="text-xs text-muted-foreground mt-1">
-                        Updated: {new Date(symbol.last_fetched).toLocaleDateString()}
-                      </div>
-                    )}
-                  </div>
-                  <Badge variant="secondary">
-                    <Database className="mr-1 h-3 w-3" />
-                    Ready
-                  </Badge>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="py-8 text-center text-muted-foreground">
-              <Database className="h-12 w-12 mx-auto mb-3 opacity-50" />
-              <p>No historical data downloaded yet</p>
-              <p className="text-sm mt-1">Use the fetch tool above to download market data</p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Training Placeholder */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Training Runs</CardTitle>
-          <CardDescription>View and manage BC/PPO training jobs</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {trainingRuns && trainingRuns.length > 0 ? (
-            <div className="space-y-3">
-              {trainingRuns.slice(0, 5).map((run) => (
-                <div key={run.id} className="flex items-center justify-between rounded-lg border border-border bg-muted/50 p-4">
-                  <div>
-                    <div className="font-semibold">{run.run_name}</div>
                     <div className="text-xs text-muted-foreground">
-                      {run.phase} | Epoch {run.current_epoch}/{run.total_epochs}
+                      {new Date(metric.created_at).toLocaleString()}
                     </div>
                   </div>
-                  <Badge variant={run.status === "completed" ? "default" : "secondary"}>
-                    {run.status}
-                  </Badge>
+                  <div className="text-right">
+                    <div className="text-sm font-semibold">
+                      Reward: {Number(metric.avg_reward).toFixed(2)}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      ε={Number(metric.epsilon).toFixed(3)} | {metric.q_table_size} states
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
           ) : (
             <div className="py-8 text-center text-muted-foreground">
               <Brain className="h-12 w-12 mx-auto mb-3 opacity-50" />
-              <p>No training runs yet</p>
-              <p className="text-sm mt-1">
-                Prepare data first, then start training in the Pipeline tab
-              </p>
+              <p>No training sessions yet</p>
+              <p className="text-sm mt-1">Start training to see results here</p>
             </div>
           )}
         </CardContent>

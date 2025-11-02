@@ -21,6 +21,9 @@ verify_jwt = false
 [functions.autonomous-trader]
 verify_jwt = false
 
+[functions.autonomous-rl-trainer]
+verify_jwt = false
+
 [functions.trading-engine]
 verify_jwt = false
 
