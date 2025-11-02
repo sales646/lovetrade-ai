@@ -182,16 +182,16 @@ function simulateTradeOutcome(
   entryIndex: number,
   side: "BUY" | "SELL",
   atr: number,
-  maxHoldBars: number = 20
+  maxHoldBars: number = 12
 ) {
   const entryBar = bars[entryIndex];
   const entryPrice = entryBar.close;
   
-  // Risk management parameters
-  const stopLossDistance = atr * 2; // 2x ATR stop
-  const takeProfitDistance = atr * 4; // 4x ATR target (2:1 R:R)
-  const slippagePct = 0.05; // 0.05% slippage
-  const feesPct = 0.1; // 0.1% fees
+  // AGGRESSIVE risk management parameters
+  const stopLossDistance = atr * 1.5; // Tighter 1.5x ATR stop (was 2x)
+  const takeProfitDistance = atr * 6; // Bigger 6x ATR target (was 4x) = 4:1 R:R
+  const slippagePct = 0.08; // More slippage from aggressive entries
+  const feesPct = 0.12; // Slightly higher fees from more trading
   
   const stopLossPrice = side === "BUY" 
     ? entryPrice - stopLossDistance 
@@ -238,7 +238,7 @@ function simulateTradeOutcome(
       }
     }
     
-    // Time-based exit
+    // Aggressive time-based exit (cut losers fast)
     if (barsHeld >= maxHoldBars) {
       exitPrice = bar.close;
       exitReason = "TIME";
@@ -254,13 +254,13 @@ function simulateTradeOutcome(
   // Apply slippage and fees
   const netPnlPct = grossPnlPct - slippagePct - feesPct;
   
-  // Convert P&L to reward (scale to reasonable range)
-  // +5% = +1.0 reward, -2.5% = -0.5 reward
-  const reward = netPnlPct / 5.0;
+  // Aggressive reward scaling: +5% = +1.5 reward (was +1.0), -2.5% = -0.75 reward (was -0.5)
+  // This amplifies both wins and losses to encourage decisiveness
+  const reward = netPnlPct / 3.3;
   
   const win = netPnlPct > 0;
-  const entryQuality = win ? 0.8 + Math.random() * 0.2 : 0.1 + Math.random() * 0.3;
-  const rrRatio = win ? Math.abs(netPnlPct / 2.5) : 0.5; // Actual R:R achieved
+  const entryQuality = win ? 0.85 + Math.random() * 0.15 : 0.05 + Math.random() * 0.2;
+  const rrRatio = win ? Math.abs(netPnlPct / 1.5) : 0.3; // More extreme R:R
   
   return {
     reward,
@@ -269,8 +269,8 @@ function simulateTradeOutcome(
     bars_held: barsHeld,
     win,
     entry_quality: entryQuality,
-    rr_ratio: Math.min(rrRatio, 3.0), // Cap at 3:1
-    delta_equity: netPnlPct * 10, // Scale for display
+    rr_ratio: Math.min(rrRatio, 5.0), // Cap at 5:1 (was 3:1)
+    delta_equity: netPnlPct * 15, // Bigger position sizing implied (was 10)
     fees: feesPct,
     slippage: slippagePct,
   };
@@ -364,7 +364,7 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
     
     // Strategy 2: VWAP_REVERSION (30% weight) - works in all regimes except choppy
     if (!shouldAvoidTrading && ind.vwap_distance_pct < -1.5 && ind.volume_zscore > 1.5) {
-      const outcome = simulateTradeOutcome(bars, i + 14, "BUY", ind.atr_14, 15); // Shorter hold for mean reversion
+      const outcome = simulateTradeOutcome(bars, i + 14, "BUY", ind.atr_14, 10); // Very fast exits (was 15)
       trajectories.push({
         symbol,
         timeframe: "5m",
@@ -381,7 +381,7 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
         slippage: outcome.slippage,
       });
     } else if (!shouldAvoidTrading && ind.vwap_distance_pct > 1.5 && ind.volume_zscore > 1.5) {
-      const outcome = simulateTradeOutcome(bars, i + 14, "SELL", ind.atr_14, 15);
+      const outcome = simulateTradeOutcome(bars, i + 14, "SELL", ind.atr_14, 10);
       trajectories.push({
         symbol,
         timeframe: "5m",
@@ -400,7 +400,7 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
     } else if (shouldAvoidTrading && (ind.vwap_distance_pct < -1.5 || ind.vwap_distance_pct > 1.5) && ind.volume_zscore > 1.5) {
       // Simulate bad trades in choppy conditions
       const side = ind.vwap_distance_pct < 0 ? "BUY" : "SELL";
-      const outcome = simulateTradeOutcome(bars, i + 14, side, ind.atr_14, 15);
+      const outcome = simulateTradeOutcome(bars, i + 14, side, ind.atr_14, 10);
       trajectories.push({
         symbol,
         timeframe: "5m",
@@ -420,7 +420,7 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
     
     // Strategy 3: TREND_PULLBACK (10% weight) - only in strong trends
     if (regime.includes("STRONG_TREND") && ind.ema_20 > ind.ema_50 && ind.rsi_14 < 45) {
-      const outcome = simulateTradeOutcome(bars, i + 14, "BUY", ind.atr_14, 25); // Longer hold for trends
+      const outcome = simulateTradeOutcome(bars, i + 14, "BUY", ind.atr_14, 15); // Faster trend exits (was 25)
       trajectories.push({
         symbol,
         timeframe: "5m",
@@ -438,14 +438,11 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
       });
     }
     
-    // HOLD actions - much more frequent in bad conditions (CRITICAL for learning to stay out)
-    const holdProbability = shouldAvoidTrading ? 0.6 : 0.15; // 60% HOLD in choppy/volatile, 15% otherwise
+    // HOLD actions - less frequent now (aggressive style favors action)
+    const holdProbability = shouldAvoidTrading ? 0.5 : 0.08; // Reduced from 60%/15%
     if (Math.random() < holdProbability) {
-      // HOLD reward structure:
-      // - In BAD conditions: +0.2 (better than losing money on bad trades at -0.3 to -0.8)
-      // - In GOOD conditions: -0.1 (worse than winning trades at +0.6 to +2.5)
-      // This teaches: trade in good conditions (earn +0.6 to +2.5), stay out in bad (earn +0.2 vs lose -0.3 to -0.8)
-      const holdReward = shouldAvoidTrading ? 0.2 : -0.1;
+      // HOLD reward: still positive in bad conditions, negative in good (but less penalty)
+      const holdReward = shouldAvoidTrading ? 0.15 : -0.05;
       trajectories.push({
         symbol,
         timeframe: "5m",
@@ -455,7 +452,7 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
         reward: holdReward,
         obs_features: { frame_stack: frameStack, current: ind },
         regime_tag: regime,
-        entry_quality: shouldAvoidTrading ? 0.85 : 0.2,
+        entry_quality: shouldAvoidTrading ? 0.8 : 0.15,
         rr_ratio: 1.0,
         delta_equity: 0,
         fees: 0,
