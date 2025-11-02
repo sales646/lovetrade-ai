@@ -144,7 +144,7 @@ export default function Training() {
         return;
       }
       
-      toast.success("🎯 Autonomous training activated! Runs automatically every 5 minutes via cron job.");
+      toast.success("🎯 Autonomous training activated! Runs automatically every minute with smaller batches.");
       setIsSystemActive(true);
     } else {
       // Disable in bot_config (cron job will skip when inactive)

@@ -45,12 +45,12 @@ async function runTrainingIteration() {
       return { success: true, message: "Training disabled" };
     }
     
-    // 1. Generate data
+    // 1. Generate data (smaller batch for faster iterations)
     await log("INFO", "📊 Generating training data from Yahoo Finance...");
     const dataResponse = await supabase.functions.invoke("auto-data-generator", {
       body: {
-        symbols: ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL"],
-        barsPerSymbol: 1000,
+        symbols: ["AAPL", "TSLA", "NVDA"],
+        barsPerSymbol: 500,
         useRealData: true,
       }
     });
@@ -65,10 +65,10 @@ async function runTrainingIteration() {
     // Wait 2 seconds for data to settle
     await new Promise(resolve => setTimeout(resolve, 2000));
     
-    // 2. Run training
+    // 2. Run training (smaller batch for faster iterations)
     await log("INFO", "🧠 Starting RL training...");
     const trainingResponse = await supabase.functions.invoke("autonomous-rl-trainer", {
-      body: { iterations: 10 }
+      body: { iterations: 3 }
     });
     
     if (trainingResponse.error) {
