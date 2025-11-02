@@ -46,16 +46,16 @@ export default function Training() {
       toast.info("🛑 Autonomous data generation stopped");
     } else {
       // Start auto generation
-      toast.success("🚀 Autonomous data generation started - running every 5 minutes");
+      toast.success("🚀 Autonomous data generation started - running every 60 seconds");
       setIsAutoGenerating(true);
       
       // Run immediately
       handleGenerateData();
       
-      // Then run every 5 minutes
+      // Then run every 60 seconds
       const id = window.setInterval(() => {
         handleGenerateData();
-      }, 300000); // 5 minutes
+      }, 60000); // 60 seconds
       
       setAutoGenIntervalId(id);
     }
@@ -295,7 +295,7 @@ export default function Training() {
                 <div>
                   <h4 className="font-semibold mb-1">🤖 Autonomous Generation</h4>
                   <p className="text-sm text-muted-foreground">
-                    Runs every 5 minutes continuously
+                    Runs every 60 seconds continuously
                   </p>
                 </div>
                 <Button
