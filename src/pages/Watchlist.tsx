@@ -10,6 +10,7 @@ import { useLatestQuote } from "@/lib/api/market";
 import { Value } from "@/components/Guard/Value";
 import { percentOrDash, currencyOrDash } from "@/lib/format";
 import { useSettingsStore } from "@/store/settingsStore";
+import { HistoricalChart } from "@/components/HistoricalChart";
 
 interface WatchlistRowProps {
   symbol: string;
@@ -32,12 +33,6 @@ function WatchlistRow({ symbol, onSelect, onRemove }: WatchlistRowProps) {
         </td>
         <td className="whitespace-nowrap px-6 py-4">
           <div className="h-4 w-24 bg-muted rounded"></div>
-        </td>
-        <td className="whitespace-nowrap px-6 py-4">
-          <div className="h-4 w-24 bg-muted rounded"></div>
-        </td>
-        <td className="whitespace-nowrap px-6 py-4">
-          <div className="h-4 w-16 bg-muted rounded"></div>
         </td>
         <td className="whitespace-nowrap px-6 py-4 text-right">
           <div className="h-8 w-8 bg-muted rounded"></div>
@@ -78,19 +73,6 @@ function WatchlistRow({ symbol, onSelect, onRemove }: WatchlistRowProps) {
           />
         </div>
       </td>
-      <td className="whitespace-nowrap px-6 py-4">
-        <Value
-          value={quote?.volume}
-          source={source}
-          formatter={(n) => n.toLocaleString()}
-          className="data-cell text-muted-foreground"
-        />
-      </td>
-      <td className="whitespace-nowrap px-6 py-4">
-        <Badge variant={quote ? "default" : "secondary"}>
-          {quote ? "active" : "idle"}
-        </Badge>
-      </td>
       <td className="whitespace-nowrap px-6 py-4 text-right">
         <Button
           variant="ghost"
@@ -110,7 +92,7 @@ function WatchlistRow({ symbol, onSelect, onRemove }: WatchlistRowProps) {
 export default function Watchlist() {
   const [newSymbol, setNewSymbol] = useState("");
   const { symbols, addSymbol, removeSymbol } = useWatchlistStore();
-  const { setActiveSymbol } = useUIStore();
+  const { activeSymbol, setActiveSymbol } = useUIStore();
 
   const handleAddSymbol = () => {
     if (newSymbol.trim()) {
@@ -144,47 +126,61 @@ export default function Watchlist() {
         </CardContent>
       </Card>
 
-      {/* Watchlist Table */}
-      <Card>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                    Symbol
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                    Price
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                    Change
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                    Volume
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {symbols.map((symbol) => (
-                  <WatchlistRow
-                    key={symbol}
-                    symbol={symbol}
-                    onSelect={() => setActiveSymbol(symbol)}
-                    onRemove={() => removeSymbol(symbol)}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </CardContent>
-      </Card>
+      <div className="grid gap-6 lg:grid-cols-2">
+        {/* Watchlist Table */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Active Symbols</CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                      Symbol
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                      Price
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                      Change
+                    </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {symbols.map((symbol) => (
+                    <WatchlistRow
+                      key={symbol}
+                      symbol={symbol}
+                      onSelect={() => setActiveSymbol(symbol)}
+                      onRemove={() => removeSymbol(symbol)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Historical Chart */}
+        {activeSymbol ? (
+          <HistoricalChart symbol={activeSymbol} timeframe="1d" limit={100} />
+        ) : (
+          <Card>
+            <CardHeader>
+              <CardTitle>Chart</CardTitle>
+              <CardDescription>Select a symbol to view historical data</CardDescription>
+            </CardHeader>
+            <CardContent className="py-12 text-center text-muted-foreground">
+              <p>Click on a symbol to see its chart</p>
+            </CardContent>
+          </Card>
+        )}
+      </div>
     </div>
   );
 }

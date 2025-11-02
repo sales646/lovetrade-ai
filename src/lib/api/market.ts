@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Quote, Bar, QuoteSchema, BarSchema } from "@/lib/types";
 import { useSettingsStore } from "@/store/settingsStore";
+import { useHistoricalBars } from "./historical";
 import { toast } from "sonner";
 
 /**
@@ -92,6 +93,7 @@ export function useLatestQuote(symbol: string | null) {
 
 /**
  * Hook to fetch historical bars with validation
+ * Now uses real database data when available, falls back to mock
  */
 export function useBars(
   symbol: string | null,
@@ -99,22 +101,28 @@ export function useBars(
   limit: number = 100
 ) {
   const { dataMode } = useSettingsStore();
+  const { data: historicalData, isLoading: historicalLoading } = useHistoricalBars(symbol, timeframe, limit);
 
   return useQuery({
     queryKey: ["bars", symbol, timeframe, limit, dataMode],
     queryFn: async () => {
       if (!symbol) return null;
 
-      // In mock mode, generate fake data
+      // If we have historical data from database, use it
+      if (historicalData && historicalData.length > 0) {
+        return historicalData;
+      }
+
+      // Otherwise, use mock mode
       if (dataMode === "mock") {
         await new Promise((resolve) => setTimeout(resolve, 200));
         return generateMockBars(symbol, limit);
       }
 
-      // TODO: Implement real API calls
+      // TODO: Implement real API calls for live mode
       throw new Error("Live/Polling mode not yet implemented");
     },
-    enabled: !!symbol,
+    enabled: !!symbol && !historicalLoading,
     staleTime: 30000, // 30 seconds
   });
 }

@@ -6,23 +6,28 @@ An advanced algorithmic trading platform with AI-powered strategies, real-time m
 
 ## 🚀 Features
 
-### Current (v0.1)
+### Current (v0.2)
 - ✅ **Modern Dashboard UI** - Dark theme optimized for trading
 - ✅ **Responsive Layout** - Collapsible sidebar navigation
-- ✅ **Watchlist Management** - Track multiple symbols
+- ✅ **Watchlist Management** - Track multiple symbols with live charts
 - ✅ **Type-Safe Architecture** - Full TypeScript with Zod validation
 - ✅ **State Management** - Zustand with persistence
 - ✅ **Routing** - Multi-page React Router setup
+- ✅ **Data Integrity** - No fabricated numbers, validated data sources
+- ✅ **Lovable Cloud Backend** - PostgreSQL database + Edge Functions
+- ✅ **Yahoo Finance Integration** - Free historical market data API
+- ✅ **Historical Data Storage** - OHLCV bars stored in database
+- ✅ **Chart Visualization** - Price & volume charts with Recharts
+- ✅ **Training Data Pipeline** - Download & prepare ML datasets
 
 ### Coming Soon
-- 🔄 Real-time market data (WebSocket)
+- 🔄 Real-time WebSocket data streaming
 - 🔄 Order ticket & position management
 - 🔄 Strategy configuration (News Momentum, VWAP Play, Exhaustion Reversal)
-- 🔄 Model training interface
+- 🔄 RL/ML model training interface
 - 🔄 System logs viewer
 - 🔄 Settings & API key management
-- 🔄 Live charts with Recharts
-- 🔄 Broker integration (Alpaca/Polygon)
+- 🔄 Advanced technical indicators
 
 ## 🛠️ Tech Stack
 
@@ -34,6 +39,10 @@ An advanced algorithmic trading platform with AI-powered strategies, real-time m
 - **Validation**: Zod
 - **Icons**: Lucide React
 - **Date Utils**: date-fns
+- **Backend**: Lovable Cloud (Supabase)
+- **Database**: PostgreSQL
+- **Edge Functions**: Deno runtime
+- **Data Source**: Yahoo Finance API (free, no key required)
 
 ## 📁 Project Structure
 
@@ -99,26 +108,32 @@ The app will be available at `http://localhost:8080`
 ## 📖 Usage
 
 1. **Dashboard** - View portfolio overview and recent signals
-2. **Watchlist** - Add symbols to monitor (e.g., AAPL, TSLA)
-3. **Orders** - (Coming soon) Place orders and manage positions
-4. **Strategies** - (Coming soon) Configure trading strategies
-5. **Training** - (Coming soon) Train and evaluate models
+2. **Watchlist** - Add symbols, view live prices and historical charts
+3. **Training** - Download historical data from Yahoo Finance for ML training
+4. **Orders** - (Coming soon) Place orders and manage positions
+5. **Strategies** - (Coming soon) Configure trading strategies
 6. **Logs** - (Coming soon) View system events
-7. **Settings** - (Coming soon) Manage API keys and preferences
+7. **Settings** - (Coming soon) Manage preferences
 
 ## 🔐 Data & Privacy
 
-- All data currently uses mock/demo values
-- No real trading connections in this version
-- Watchlist persisted in browser localStorage
-- No external API calls yet
+- **Historical Data**: Fetched from Yahoo Finance (free public API)
+- **Database Storage**: Lovable Cloud (PostgreSQL) for training datasets
+- **Mock Mode**: Available for testing without real data
+- **Watchlist**: Persisted in browser localStorage
+- **RLS Policies**: Database protected with Row Level Security
 
 ## 📝 Roadmap
 
-### Phase 1 (Current)
+### Phase 1 (✅ Completed)
 - [x] Core UI/UX foundation
 - [x] Routing & navigation
 - [x] State management setup
+- [x] Data integrity guardrails
+- [x] Lovable Cloud backend
+- [x] Yahoo Finance integration
+- [x] Historical data storage
+- [x] Chart visualization
 
 ### Phase 2 (Next)
 - [ ] WebSocket integration

@@ -1,0 +1,4 @@
+project_id = "rgpgssvakgutmgejazjq"
+
+[functions.fetch-market-data]
+verify_jwt = false
