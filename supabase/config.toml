@@ -41,3 +41,6 @@ verify_jwt = false
 
 [functions.strategy-promoter]
 verify_jwt = false
+
+[functions.autonomous-training-loop]
+verify_jwt = false
