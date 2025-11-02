@@ -1,73 +1,155 @@
-# Welcome to your Lovable project
+# TradePilot - AI-Powered Algorithmic Trading Platform
 
-## Project info
+![TradePilot](https://img.shields.io/badge/TradePilot-Trading%20Platform-00a0dc?style=for-the-badge)
 
-**URL**: https://lovable.dev/projects/7b040b8f-dffe-48c1-aedd-fecc6dccf027
+An advanced algorithmic trading platform with AI-powered strategies, real-time market monitoring, and automated execution capabilities.
 
-## How can I edit this code?
+## 🚀 Features
 
-There are several ways of editing your application.
+### Current (v0.1)
+- ✅ **Modern Dashboard UI** - Dark theme optimized for trading
+- ✅ **Responsive Layout** - Collapsible sidebar navigation
+- ✅ **Watchlist Management** - Track multiple symbols
+- ✅ **Type-Safe Architecture** - Full TypeScript with Zod validation
+- ✅ **State Management** - Zustand with persistence
+- ✅ **Routing** - Multi-page React Router setup
 
-**Use Lovable**
+### Coming Soon
+- 🔄 Real-time market data (WebSocket)
+- 🔄 Order ticket & position management
+- 🔄 Strategy configuration (News Momentum, VWAP Play, Exhaustion Reversal)
+- 🔄 Model training interface
+- 🔄 System logs viewer
+- 🔄 Settings & API key management
+- 🔄 Live charts with Recharts
+- 🔄 Broker integration (Alpaca/Polygon)
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/7b040b8f-dffe-48c1-aedd-fecc6dccf027) and start prompting.
+## 🛠️ Tech Stack
 
-Changes made via Lovable will be committed automatically to this repo.
+- **Framework**: React 18 + TypeScript + Vite
+- **UI**: Tailwind CSS + shadcn/ui
+- **State**: Zustand (with persistence)
+- **Data Fetching**: React Query
+- **Charts**: Recharts
+- **Validation**: Zod
+- **Icons**: Lucide React
+- **Date Utils**: date-fns
 
-**Use your preferred IDE**
+## 📁 Project Structure
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+```
+src/
+├── components/
+│   ├── ui/              # shadcn UI components
+│   └── DashboardLayout.tsx
+├── pages/
+│   ├── Dashboard.tsx    # Main dashboard
+│   ├── Watchlist.tsx    # Symbol watchlist
+│   ├── Orders.tsx       # Orders & positions
+│   ├── Strategies.tsx   # Strategy config
+│   ├── Training.tsx     # Model training
+│   ├── Logs.tsx         # System logs
+│   └── Settings.tsx     # App settings
+├── store/
+│   ├── uiStore.ts       # UI state
+│   ├── watchlistStore.ts
+│   └── connectionStore.ts
+├── lib/
+│   └── types.ts         # Type definitions & schemas
+└── App.tsx
+```
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+## 🎨 Design System
 
-Follow these steps:
+**Color Palette:**
+- Primary: Cyan (#00a0dc) - Interactive elements
+- Success: Emerald - Profitable trades
+- Destructive: Red - Losses
+- Background: Deep charcoal (#0d1117)
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+**Design Principles:**
+- High contrast for data visibility
+- Smooth animations for real-time updates
+- Trading conventions (green = up, red = down)
+- Professional, data-dense interface
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+## 🚦 Getting Started
 
-# Step 3: Install the necessary dependencies.
-npm i
+### Prerequisites
+- Node.js 18+ & npm
 
-# Step 4: Start the development server with auto-reloading and an instant preview.
+### Installation
+
+```bash
+# Clone the repository
+git clone <your-repo-url>
+
+# Navigate to directory
+cd tradepilot
+
+# Install dependencies
+npm install
+
+# Start development server
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+The app will be available at `http://localhost:8080`
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+## 📖 Usage
 
-**Use GitHub Codespaces**
+1. **Dashboard** - View portfolio overview and recent signals
+2. **Watchlist** - Add symbols to monitor (e.g., AAPL, TSLA)
+3. **Orders** - (Coming soon) Place orders and manage positions
+4. **Strategies** - (Coming soon) Configure trading strategies
+5. **Training** - (Coming soon) Train and evaluate models
+6. **Logs** - (Coming soon) View system events
+7. **Settings** - (Coming soon) Manage API keys and preferences
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+## 🔐 Data & Privacy
 
-## What technologies are used for this project?
+- All data currently uses mock/demo values
+- No real trading connections in this version
+- Watchlist persisted in browser localStorage
+- No external API calls yet
 
-This project is built with:
+## 📝 Roadmap
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+### Phase 1 (Current)
+- [x] Core UI/UX foundation
+- [x] Routing & navigation
+- [x] State management setup
 
-## How can I deploy this project?
+### Phase 2 (Next)
+- [ ] WebSocket integration
+- [ ] Live market data
+- [ ] Order placement UI
+- [ ] Strategy configuration
 
-Simply open [Lovable](https://lovable.dev/projects/7b040b8f-dffe-48c1-aedd-fecc6dccf027) and click on Share -> Publish.
+### Phase 3
+- [ ] RL/ML training interface
+- [ ] Broker integrations (Alpaca, Polygon)
+- [ ] Advanced charting
+- [ ] Performance analytics
 
-## Can I connect a custom domain to my Lovable project?
+### Phase 4
+- [ ] Multi-ticker concurrency
+- [ ] Backtesting engine
+- [ ] Alert system
+- [ ] Mobile optimization
 
-Yes, you can!
+## 🤝 Contributing
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+This is a work in progress. Contributions welcome!
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+## 📄 License
+
+MIT License - See LICENSE file for details
+
+## ⚠️ Disclaimer
+
+This is a demo/educational platform. Not financial advice. Trading carries risk. Always do your own research and consult with financial professionals.
+
+---
+
+**Built with** [Lovable](https://lovable.dev) 💜
