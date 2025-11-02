@@ -16,6 +16,8 @@ export default function Training() {
   const [iterations, setIterations] = useState(10);
   const [isAutoRunning, setIsAutoRunning] = useState(false);
   const [autoIntervalId, setAutoIntervalId] = useState<number | null>(null);
+  const [isAutoGenerating, setIsAutoGenerating] = useState(false);
+  const [autoGenIntervalId, setAutoGenIntervalId] = useState<number | null>(null);
   
   const startTraining = useStartAutonomousTraining();
   const generateData = useGenerateTrainingData();
@@ -31,6 +33,32 @@ export default function Training() {
       symbols: ["AAPL", "TSLA", "MSFT", "GOOGL", "AMZN"],
       barsPerSymbol: 500,
     });
+  };
+
+  const handleToggleAutoGeneration = () => {
+    if (isAutoGenerating) {
+      // Stop auto generation
+      if (autoGenIntervalId) {
+        clearInterval(autoGenIntervalId);
+        setAutoGenIntervalId(null);
+      }
+      setIsAutoGenerating(false);
+      toast.info("🛑 Autonomous data generation stopped");
+    } else {
+      // Start auto generation
+      toast.success("🚀 Autonomous data generation started - running every 5 minutes");
+      setIsAutoGenerating(true);
+      
+      // Run immediately
+      handleGenerateData();
+      
+      // Then run every 5 minutes
+      const id = window.setInterval(() => {
+        handleGenerateData();
+      }, 300000); // 5 minutes
+      
+      setAutoGenIntervalId(id);
+    }
   };
 
   const handleToggleAutoTraining = () => {
@@ -65,8 +93,11 @@ export default function Training() {
       if (autoIntervalId) {
         clearInterval(autoIntervalId);
       }
+      if (autoGenIntervalId) {
+        clearInterval(autoGenIntervalId);
+      }
     };
-  }, [autoIntervalId]);
+  }, [autoIntervalId, autoGenIntervalId]);
 
   const latestMetric = metrics?.[0];
   const totalEpisodes = qState?.episode_count || 0;
@@ -223,24 +254,27 @@ export default function Training() {
                 Generate synthetic training data for both cloud and local Python training
               </CardDescription>
             </div>
+            {isAutoGenerating && (
+              <Badge variant="default" className="animate-pulse">
+                <RefreshCw className="mr-1 h-3 w-3" />
+                Auto-Generating
+              </Badge>
+            )}
           </div>
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
             <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between mb-3">
                 <div>
-                  <h4 className="font-semibold mb-1">🎲 Generate Training Data</h4>
+                  <h4 className="font-semibold mb-1">🎲 Manual Generation</h4>
                   <p className="text-sm text-muted-foreground">
                     Creates 500 bars + indicators + expert trajectories for 5 symbols
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Data is available for both cloud RL training and local Python scripts
                   </p>
                 </div>
                 <Button
                   onClick={handleGenerateData}
-                  disabled={generateData.isPending}
+                  disabled={generateData.isPending || isAutoGenerating}
                   size="lg"
                 >
                   {generateData.isPending ? (
@@ -251,7 +285,33 @@ export default function Training() {
                   ) : (
                     <>
                       <Database className="mr-2 h-4 w-4" />
-                      Generate Data
+                      Generate Once
+                    </>
+                  )}
+                </Button>
+              </div>
+              
+              <div className="pt-3 border-t border-primary/10 flex items-center justify-between">
+                <div>
+                  <h4 className="font-semibold mb-1">🤖 Autonomous Generation</h4>
+                  <p className="text-sm text-muted-foreground">
+                    Runs every 5 minutes continuously
+                  </p>
+                </div>
+                <Button
+                  onClick={handleToggleAutoGeneration}
+                  variant={isAutoGenerating ? "destructive" : "default"}
+                  disabled={generateData.isPending}
+                >
+                  {isAutoGenerating ? (
+                    <>
+                      <Pause className="mr-2 h-4 w-4" />
+                      Stop Auto
+                    </>
+                  ) : (
+                    <>
+                      <Play className="mr-2 h-4 w-4" />
+                      Start Auto
                     </>
                   )}
                 </Button>
@@ -259,25 +319,73 @@ export default function Training() {
             </div>
 
             <div className="rounded-lg border border-border bg-muted/50 p-4">
-              <h4 className="font-semibold mb-2">What gets generated:</h4>
-              <ul className="space-y-1 text-sm text-muted-foreground">
-                <li className="flex items-start gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
-                  <span><strong>Historical bars:</strong> OHLCV data (5-minute intervals)</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
-                  <span><strong>Technical indicators:</strong> RSI, ATR, VWAP, EMA, Volume z-score, etc.</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
-                  <span><strong>Expert trajectories:</strong> Weighted signals from RSI_EMA (40%), VWAP_REVERSION (30%), TREND_PULLBACK (10%)</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
-                  <span><strong>Symbols:</strong> AAPL, TSLA, MSFT, GOOGL, AMZN</span>
-                </li>
-              </ul>
+              <h4 className="font-semibold mb-3">📊 How Scenarios Are Generated:</h4>
+              
+              <div className="space-y-3">
+                <div>
+                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
+                    <span className="text-primary">1.</span> Synthetic Market Data
+                  </h5>
+                  <p className="text-xs text-muted-foreground ml-5">
+                    Creates realistic OHLCV bars with 2% volatility, trending patterns (sine waves), 
+                    and volume fluctuations simulating real market conditions
+                  </p>
+                </div>
+                
+                <div>
+                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
+                    <span className="text-primary">2.</span> Technical Indicators
+                  </h5>
+                  <p className="text-xs text-muted-foreground ml-5">
+                    Calculates RSI(14), ATR(14), VWAP, EMA(20/50), volume z-score, intraday position, 
+                    and range % for each bar
+                  </p>
+                </div>
+                
+                <div>
+                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
+                    <span className="text-primary">3.</span> Expert Trading Strategies
+                  </h5>
+                  <ul className="space-y-1 text-xs text-muted-foreground ml-5">
+                    <li className="flex items-start gap-2">
+                      <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
+                      <span><strong>RSI_EMA (40%):</strong> Buy when RSI&lt;30 & EMA20&gt;EMA50, Sell when RSI&gt;70 & EMA20&lt;EMA50</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
+                      <span><strong>VWAP_REVERSION (30%):</strong> Buy/Sell on ±1.5% VWAP distance with high volume</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
+                      <span><strong>TREND_PULLBACK (10%):</strong> Buy pullbacks in uptrends (EMA20&gt;EMA50, RSI&lt;45)</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
+                      <span><strong>HOLD_BASELINE (30%):</strong> Random HOLD actions with -0.05 penalty</span>
+                    </li>
+                  </ul>
+                </div>
+                
+                <div>
+                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
+                    <span className="text-primary">4.</span> Frame Stack Features
+                  </h5>
+                  <p className="text-xs text-muted-foreground ml-5">
+                    Each trajectory includes 32 bars of historical context with close, volume, RSI, ATR, 
+                    VWAP distance, and volume z-score for sequence learning
+                  </p>
+                </div>
+                
+                <div>
+                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
+                    <span className="text-primary">5.</span> Reward Simulation
+                  </h5>
+                  <p className="text-xs text-muted-foreground ml-5">
+                    Generates simulated rewards, entry quality (0.7-0.8), risk/reward ratios (1.8-2.5), 
+                    delta equity, fees (0.1), and slippage (0.05) for realistic training
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         </CardContent>
