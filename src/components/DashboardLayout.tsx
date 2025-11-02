@@ -1,5 +1,5 @@
-import { ReactNode } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { ReactNode, useState, KeyboardEvent } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
   Eye,
@@ -10,8 +10,10 @@ import {
   Settings,
   Menu,
   Activity,
+  Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useUIStore } from "@/store/uiStore";
 import { DataModeBadge } from "@/components/DataModeBadge";
@@ -32,7 +34,22 @@ interface DashboardLayoutProps {
 
 export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const location = useLocation();
+  const navigate = useNavigate();
   const { sidebarCollapsed, toggleSidebar } = useUIStore();
+  const [searchSymbol, setSearchSymbol] = useState("");
+
+  const handleSearch = () => {
+    if (searchSymbol.trim()) {
+      navigate(`/watchlist?add=${searchSymbol.toUpperCase()}`);
+      setSearchSymbol("");
+    }
+  };
+
+  const handleKeyPress = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      handleSearch();
+    }
+  };
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background">
@@ -97,6 +114,16 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
           </div>
 
           <div className="flex items-center gap-4">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="Search symbol..."
+                value={searchSymbol}
+                onChange={(e) => setSearchSymbol(e.target.value)}
+                onKeyPress={handleKeyPress}
+                className="w-[200px] pl-9 uppercase"
+              />
+            </div>
             <DataModeBadge />
           </div>
         </header>
