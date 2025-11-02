@@ -45,47 +45,54 @@ class TrainingConfig:
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
     
-    # Data
+    # Data - OPTIMIZED FOR MAXIMUM MARKET PREDICTION
     symbols: List[str] = None
     timeframe: str = "5m"
-    train_days: int = 20
-    val_days: int = 7
-    test_days: int = 3
+    train_days: int = 30
+    val_days: int = 10
+    test_days: int = 5
     embargo_days: int = 1
     
-    # Features
-    frame_stack_size: int = 32
+    # Features - INCREASED FOR BETTER CONTEXT
+    frame_stack_size: int = 64  # Doubled from 32 for more historical context
     feature_dim: int = 15  # Technical indicators per bar
     
-    # BC Training
-    bc_epochs: int = 50
-    bc_batch_size: int = 256
-    bc_lr: float = 3e-4
+    # BC Training - OPTIMIZED FOR BETTER LEARNING
+    bc_epochs: int = 100  # Increased from 50 for better convergence
+    bc_batch_size: int = 512  # Increased from 256 for faster GPU training
+    bc_lr: float = 2e-4  # Slightly lower for more stable learning
     bc_weight_decay: float = 1e-5
-    bc_early_stop_patience: int = 5
+    bc_early_stop_patience: int = 10  # More patience for better models
     
-    # PPO Training
-    ppo_total_timesteps: int = 100000
-    ppo_n_steps: int = 2048
-    ppo_batch_size: int = 2048
-    ppo_learning_rate: float = 3e-4
-    ppo_gamma: float = 0.99
-    ppo_gae_lambda: float = 0.95
-    ppo_clip_range: float = 0.2
+    # PPO Training - MAXIMIZED FOR BEST PERFORMANCE
+    ppo_total_timesteps: int = 500000  # 5x increase for deeper learning
+    ppo_n_steps: int = 4096  # Increased from 2048 for better rollouts
+    ppo_batch_size: int = 4096  # Increased from 2048 for GPU efficiency
+    ppo_learning_rate: float = 2e-4  # Slightly lower for stability
+    ppo_gamma: float = 0.995  # Higher discount for long-term planning
+    ppo_gae_lambda: float = 0.98  # Higher for better advantage estimation
+    ppo_clip_range: float = 0.15  # Tighter for more conservative updates
     ppo_vf_coef: float = 0.5
-    ppo_ent_coef: float = 0.01
+    ppo_ent_coef: float = 0.005  # Lower for more exploitation
     ppo_max_grad_norm: float = 0.5
     
-    # Reward shaping
-    lambda_risk: float = 0.2
-    reward_clip: Tuple[float, float] = (-5.0, 5.0)
+    # Reward shaping - OPTIMIZED FOR SHARPE RATIO
+    lambda_risk: float = 0.3  # Higher risk penalty for better risk-adjusted returns
+    reward_clip: Tuple[float, float] = (-3.0, 3.0)  # Tighter clipping
     
     # Walk-forward
-    n_seeds: int = 3
+    n_seeds: int = 5  # More seeds for robustness
     
     def __post_init__(self):
         if self.symbols is None:
-            self.symbols = ["SPY", "QQQ", "AAPL", "TSLA"]
+            # EXPANDED SYMBOL LIST FOR DIVERSIFICATION
+            self.symbols = [
+                "SPY", "QQQ", "IWM", "DIA",  # Indices
+                "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META",  # Large caps
+                "AMD", "NFLX", "INTC", "CSCO",  # Tech
+                "JPM", "BAC", "GS",  # Finance
+                "XOM", "CVX",  # Energy
+            ]
 
 # ============================================================================
 # Data Loading
@@ -136,18 +143,20 @@ class TrajectoryDataset(Dataset):
         logger.info(f"Action distribution: {np.bincount(self.actions)}")
     
     def _parse_frame_stack(self, obs_features: Dict) -> np.ndarray:
-        """Extract frame stack features"""
+        """Extract frame stack features with normalization"""
         frame_stack = obs_features.get('frame_stack', [])
         
         features = []
         for frame in frame_stack[-self.config.frame_stack_size:]:
+            # Normalize features for better learning
+            close = frame.get('close', 0)
             features.append([
-                frame.get('close', 0),
-                frame.get('volume', 0),
-                frame.get('rsi_14', 50),
-                frame.get('atr_14', 0),
-                frame.get('vwap_distance_pct', 0),
-                frame.get('volume_zscore', 0),
+                close / 100.0,  # Normalize price
+                frame.get('volume', 0) / 1e6,  # Normalize volume to millions
+                (frame.get('rsi_14', 50) - 50) / 50,  # Center RSI around 0
+                frame.get('atr_14', 0) / close if close > 0 else 0,  # ATR as % of price
+                frame.get('vwap_distance_pct', 0) / 10,  # Scale VWAP distance
+                frame.get('volume_zscore', 0) / 3,  # Normalize z-score
             ])
         
         # Pad if necessary
@@ -322,8 +331,8 @@ class TradingEnv(gym.Env):
         # Action space: {0: SELL, 1: HOLD, 2: BUY}
         self.action_space = spaces.Discrete(3)
         
-        # Observation space: flattened frame stack
-        obs_dim = config.frame_stack_size * 6  # 6 features per bar
+        # Observation space: flattened frame stack (64 bars * 6 features)
+        obs_dim = config.frame_stack_size * 6  # 384 features for better context
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         
         self.steps_in_episode = 0
@@ -352,24 +361,36 @@ class TradingEnv(gym.Env):
         
         traj = self.trajectories[self.current_idx]
         expert_action = traj['action']  # {-1: sell, 0: hold, 1: buy}
-        reward = traj['reward']
+        base_reward = traj['reward']
         
-        # Normalize reward by ATR
+        # Enhanced reward shaping for better market prediction
         obs_features = traj['obs_features']
         atr = obs_features['current'].get('atr_14', 1.0)
-        normalized_reward = np.clip(reward / max(atr, 0.01), *self.config.reward_clip)
         
-        # Track returns and equity
-        self.episode_returns.append(normalized_reward)
-        pnl = reward * 0.01 * self.current_equity  # Convert to dollar P&L
+        # Risk-adjusted reward with Sharpe-like scaling
+        pnl = base_reward * 0.01 * self.current_equity
         self.current_equity += pnl
+        
+        # Calculate rolling Sharpe-like metric for reward bonus
+        self.episode_returns.append(base_reward)
+        if len(self.episode_returns) > 10:
+            recent_returns = self.episode_returns[-10:]
+            sharpe_bonus = (np.mean(recent_returns) / (np.std(recent_returns) + 1e-6)) * 0.2
+        else:
+            sharpe_bonus = 0
+        
+        # Final reward with Sharpe bonus and risk penalty
+        normalized_reward = base_reward - (self.config.lambda_risk * abs(base_reward))
+        normalized_reward += sharpe_bonus
+        normalized_reward = np.clip(normalized_reward, *self.config.reward_clip)
+        
         self.equity_curve.append(self.current_equity)
         
         # Track trade if action is BUY or SELL
         if action != 1:  # Not HOLD
             trade = {
                 'action': action,
-                'reward': reward,
+                'reward': base_reward,
                 'pnl': pnl,
                 'correct': (action - 1) == expert_action  # Convert action space
             }
@@ -452,13 +473,15 @@ class TradingEnv(gym.Env):
         features = []
         
         for frame in frame_stack[-self.config.frame_stack_size:]:
+            # Normalize features same as in dataset
+            close = frame.get('close', 0)
             features.append([
-                frame.get('close', 0),
-                frame.get('volume', 0),
-                frame.get('rsi_14', 50),
-                frame.get('atr_14', 0),
-                frame.get('vwap_distance_pct', 0),
-                frame.get('volume_zscore', 0),
+                close / 100.0,
+                frame.get('volume', 0) / 1e6,
+                (frame.get('rsi_14', 50) - 50) / 50,
+                frame.get('atr_14', 0) / close if close > 0 else 0,
+                frame.get('vwap_distance_pct', 0) / 10,
+                frame.get('volume_zscore', 0) / 3,
             ])
         
         while len(features) < self.config.frame_stack_size:

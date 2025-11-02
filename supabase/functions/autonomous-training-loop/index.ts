@@ -61,12 +61,27 @@ async function runContinuousTraining() {
       loopCount++;
       await log("INFO", `🔄 Training loop iteration #${loopCount}`);
       
-      // 1. Generate data
-      await log("INFO", "📊 Generating training data from Yahoo Finance...");
+      // 1. Generate data - MAXIMIZED FOR MARKET DIVERSITY
+      await log("INFO", "📊 Generating comprehensive training data from Yahoo Finance...");
       const dataResponse = await supabase.functions.invoke("auto-data-generator", {
         body: {
-          symbols: ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL"],
-          barsPerSymbol: 1000, // More bars for real data
+          symbols: [
+            // Indices
+            "SPY", "QQQ", "IWM", "DIA",
+            // Large Cap Tech
+            "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META",
+            // Tech & Semiconductors
+            "AMD", "NFLX", "INTC", "CSCO", "AVGO", "CRM",
+            // Finance
+            "JPM", "BAC", "GS", "MS", "C",
+            // Healthcare
+            "UNH", "JNJ", "PFE",
+            // Energy
+            "XOM", "CVX",
+            // Consumer
+            "WMT", "HD", "MCD",
+          ],
+          barsPerSymbol: 5000, // 5x increase for more historical depth
           useRealData: true, // Always use real market data
         }
       });
@@ -80,10 +95,10 @@ async function runContinuousTraining() {
       // Wait 2 seconds for data to settle
       await new Promise(resolve => setTimeout(resolve, 2000));
       
-      // 2. Run training
-      await log("INFO", "🧠 Starting RL training...");
+      // 2. Run training - INCREASED ITERATIONS FOR DEEPER LEARNING
+      await log("INFO", "🧠 Starting intensive RL training...");
       const trainingResponse = await supabase.functions.invoke("autonomous-rl-trainer", {
-        body: { iterations: 10 }
+        body: { iterations: 50 }  // 5x increase from 10 to 50
       });
       
       if (trainingResponse.error) {
