@@ -167,36 +167,57 @@ export default function Training() {
     }
   };
 
-  const latestMetric = metrics?.[0];
-  const totalEpisodes = qState?.episode_count || latestMetric?.total_episodes || 0;
-  const epsilon = qState?.epsilon || latestMetric?.epsilon || 0;
+  // Use GPU metrics if available, fallback to Q-learning
+  const latestGPUMetric = gpuMetrics?.[0];
+  const latestQLMetric = metrics?.[0];
+  
+  // Prefer GPU training data when available
+  const latestMetric = latestGPUMetric || latestQLMetric;
+  const totalEpisodes = latestGPUMetric 
+    ? (gpuMetrics?.length || 0) 
+    : (qState?.episode_count || latestQLMetric?.total_episodes || 0);
+  const epsilon = latestGPUMetric 
+    ? 0 // GPU training uses different exploration 
+    : (qState?.epsilon || latestQLMetric?.epsilon || 0);
   const qTableSize = qState?.q_table ? Object.keys(qState.q_table).length : 0;
   
   // Calculate actual trading performance (% of profitable batches)
   const calculatePerformanceScore = () => {
-    if (!metrics || metrics.length === 0) return 0;
-    const recent = metrics.slice(0, Math.min(20, metrics.length));
-    const profitableBatches = recent.filter(m => Number(m.avg_reward) > 0).length;
+    const dataSource = gpuMetrics || metrics;
+    if (!dataSource || dataSource.length === 0) return 0;
+    const recent = dataSource.slice(0, Math.min(20, dataSource.length));
+    const profitableBatches = recent.filter(m => {
+      const reward = 'mean_reward' in m ? m.mean_reward : 'avg_reward' in m ? m.avg_reward : 0;
+      return Number(reward) > 0;
+    }).length;
     return (profitableBatches / recent.length) * 100;
   };
   
   // Calculate average reward trend (last 20 batches)
   const calculateAvgRewardTrend = () => {
-    if (!metrics || metrics.length < 2) return 0;
-    const recent = metrics.slice(0, Math.min(20, metrics.length));
-    const avgRecent = recent.reduce((sum, m) => sum + Number(m.avg_reward), 0) / recent.length;
+    const dataSource = gpuMetrics || metrics;
+    if (!dataSource || dataSource.length < 2) return 0;
+    const recent = dataSource.slice(0, Math.min(20, dataSource.length));
+    const avgRecent = recent.reduce((sum, m) => {
+      const reward = 'mean_reward' in m ? m.mean_reward : 'avg_reward' in m ? m.avg_reward : 0;
+      return sum + Number(reward);
+    }, 0) / recent.length;
     return avgRecent;
   };
   
   const performanceScore = calculatePerformanceScore();
   const avgRewardTrend = calculateAvgRewardTrend();
 
-  // Prepare chart data
-  const chartData = metrics?.slice(0, 20).reverse().map((m, i) => ({
-    episode: totalEpisodes - metrics.length + i + 1,
-    reward: Number(m.avg_reward),
-    epsilon: Number(m.epsilon),
-  })) || [];
+  // Prepare chart data (prefer GPU metrics)
+  const dataSource = gpuMetrics || metrics;
+  const chartData = dataSource?.slice(0, 20).reverse().map((m, i) => {
+    const reward = 'mean_reward' in m ? m.mean_reward : 'avg_reward' in m ? m.avg_reward : 0;
+    return {
+      episode: i + 1,
+      reward: Number(reward),
+      epsilon: Number(m.epsilon || 0),
+    };
+  }) || [];
 
   return (
     <div className="space-y-6">
@@ -389,9 +410,11 @@ export default function Training() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {latestMetric ? Number(latestMetric.avg_reward).toFixed(2) : "—"}
+              {latestMetric ? Number('mean_reward' in latestMetric ? latestMetric.mean_reward : 'avg_reward' in latestMetric ? latestMetric.avg_reward : 0).toFixed(2) : "—"}
             </div>
-            <p className="text-xs text-muted-foreground">Latest episode</p>
+            <p className="text-xs text-muted-foreground">
+              {latestGPUMetric ? "GPU Training" : "Q-Learning"}
+            </p>
           </CardContent>
         </Card>
 
@@ -427,16 +450,20 @@ export default function Training() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {latestMetric?.win_rate_pct ? `${Number(latestMetric.win_rate_pct).toFixed(1)}%` : "—"}
+              {latestMetric && ('win_rate' in latestMetric || 'win_rate_pct' in latestMetric) 
+                ? `${Number('win_rate' in latestMetric ? latestMetric.win_rate : latestMetric.win_rate_pct).toFixed(1)}%` 
+                : "—"}
             </div>
             <Progress 
-              value={latestMetric?.win_rate_pct ? Number(latestMetric.win_rate_pct) : 0} 
+              value={latestMetric && ('win_rate' in latestMetric || 'win_rate_pct' in latestMetric)
+                ? Number('win_rate' in latestMetric ? latestMetric.win_rate : latestMetric.win_rate_pct) 
+                : 0} 
               className="mt-2" 
             />
             <p className="text-xs text-muted-foreground mt-1">
-              {latestMetric?.winning_trades && latestMetric?.total_trades 
-                ? `${latestMetric.winning_trades}/${latestMetric.total_trades} profitable trades`
-                : "Latest batch"}
+              {latestGPUMetric ? "From GPU training" : (latestQLMetric && 'winning_trades' in latestQLMetric && 'total_trades' in latestQLMetric
+                ? `${latestQLMetric.winning_trades}/${latestQLMetric.total_trades} profitable trades`
+                : "Latest batch")}
             </p>
           </CardContent>
         </Card>
@@ -447,9 +474,9 @@ export default function Training() {
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className={`text-2xl font-bold ${latestMetric?.avg_return_pct && Number(latestMetric.avg_return_pct) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-              {latestMetric?.avg_return_pct 
-                ? `${Number(latestMetric.avg_return_pct) >= 0 ? '+' : ''}${Number(latestMetric.avg_return_pct).toFixed(2)}%`
+            <div className={`text-2xl font-bold ${latestQLMetric && 'avg_return_pct' in latestQLMetric && Number(latestQLMetric.avg_return_pct) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+              {latestQLMetric && 'avg_return_pct' in latestQLMetric
+                ? `${Number(latestQLMetric.avg_return_pct) >= 0 ? '+' : ''}${Number(latestQLMetric.avg_return_pct).toFixed(2)}%`
                 : "—"}
             </div>
             <p className="text-xs text-muted-foreground mt-1">Per trade (net of fees)</p>
@@ -462,14 +489,14 @@ export default function Training() {
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className={`text-2xl font-bold ${latestMetric?.avg_dollar_pnl && Number(latestMetric.avg_dollar_pnl) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-              {latestMetric?.avg_dollar_pnl 
-                ? `$${Number(latestMetric.avg_dollar_pnl) >= 0 ? '+' : ''}${Number(latestMetric.avg_dollar_pnl).toFixed(2)}`
+            <div className={`text-2xl font-bold ${latestQLMetric && 'avg_dollar_pnl' in latestQLMetric && Number(latestQLMetric.avg_dollar_pnl) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+              {latestQLMetric && 'avg_dollar_pnl' in latestQLMetric
+                ? `$${Number(latestQLMetric.avg_dollar_pnl) >= 0 ? '+' : ''}${Number(latestQLMetric.avg_dollar_pnl).toFixed(2)}`
                 : "—"}
             </div>
             <p className="text-xs text-muted-foreground mt-1">
-              {latestMetric?.account_equity 
-                ? `Account: $${Number(latestMetric.account_equity).toLocaleString()}`
+              {latestQLMetric && 'account_equity' in latestQLMetric
+                ? `Account: $${Number(latestQLMetric.account_equity).toLocaleString()}`
                 : "Per trade in dollars"}
             </p>
           </CardContent>
@@ -482,12 +509,12 @@ export default function Training() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-blue-600">
-              {latestMetric?.avg_confidence 
-                ? `${(Number(latestMetric.avg_confidence) * 100).toFixed(1)}%`
+              {latestQLMetric && 'avg_confidence' in latestQLMetric
+                ? `${(Number(latestQLMetric.avg_confidence) * 100).toFixed(1)}%`
                 : "—"}
             </div>
             <Progress 
-              value={latestMetric?.avg_confidence ? Number(latestMetric.avg_confidence) * 100 : 0} 
+              value={latestQLMetric && 'avg_confidence' in latestQLMetric ? Number(latestQLMetric.avg_confidence) * 100 : 0} 
               className="mt-2" 
             />
             <p className="text-xs text-muted-foreground mt-1">Position sizing confidence</p>
@@ -862,7 +889,7 @@ export default function Training() {
       </Card>
 
       {/* Expert Imitation Stats */}
-      {latestMetric && latestMetric.expert_accuracies && (
+      {latestQLMetric && 'expert_accuracies' in latestQLMetric && latestQLMetric.expert_accuracies && (
         <Card>
           <CardHeader>
             <CardTitle>Expert Imitation Performance</CardTitle>
@@ -870,7 +897,7 @@ export default function Training() {
           </CardHeader>
           <CardContent>
             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-              {Object.entries(latestMetric.expert_accuracies as Record<string, number>)
+              {Object.entries(latestQLMetric.expert_accuracies as Record<string, number>)
                 .sort((a, b) => b[1] - a[1])
                 .map(([expert, accuracy]) => {
                   const weight = expert === "RSI_EMA" ? 0.40 
@@ -899,7 +926,7 @@ export default function Training() {
       )}
 
       {/* Loss & Action Distribution */}
-      {latestMetric && (
+      {latestQLMetric && 'alpha_mix' in latestQLMetric && (
         <div className="grid gap-4 md:grid-cols-2">
           <Card>
             <CardHeader>
@@ -909,22 +936,22 @@ export default function Training() {
             <CardContent className="space-y-4">
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm text-muted-foreground">L_imitation (α={latestMetric.alpha_mix?.toFixed(2) || "—"})</span>
-                  <span className="text-sm font-medium">{Number(latestMetric.l_imitation || 0).toFixed(4)}</span>
+                  <span className="text-sm text-muted-foreground">L_imitation (α={latestQLMetric.alpha_mix?.toFixed(2) || "—"})</span>
+                  <span className="text-sm font-medium">{Number('l_imitation' in latestQLMetric ? latestQLMetric.l_imitation : 0).toFixed(4)}</span>
                 </div>
-                <Progress value={(latestMetric.alpha_mix || 0) * 100} className="h-2" />
+                <Progress value={(latestQLMetric.alpha_mix || 0) * 100} className="h-2" />
               </div>
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm text-muted-foreground">L_rl (1-α={(1 - (latestMetric.alpha_mix || 0)).toFixed(2)})</span>
-                  <span className="text-sm font-medium">{Number(latestMetric.l_rl || 0).toFixed(4)}</span>
+                  <span className="text-sm text-muted-foreground">L_rl (1-α={(1 - (latestQLMetric.alpha_mix || 0)).toFixed(2)})</span>
+                  <span className="text-sm font-medium">{Number('l_rl' in latestQLMetric ? latestQLMetric.l_rl : 0).toFixed(4)}</span>
                 </div>
-                <Progress value={(1 - (latestMetric.alpha_mix || 0)) * 100} className="h-2" />
+                <Progress value={(1 - (latestQLMetric.alpha_mix || 0)) * 100} className="h-2" />
               </div>
               <div className="pt-2 border-t">
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-semibold">L_total</span>
-                  <span className="text-lg font-bold">{Number(latestMetric.l_total || 0).toFixed(4)}</span>
+                  <span className="text-lg font-bold">{Number('l_total' in latestQLMetric ? latestQLMetric.l_total : 0).toFixed(4)}</span>
                 </div>
               </div>
             </CardContent>
