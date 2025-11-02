@@ -449,12 +449,12 @@ def main():
     run_id = run_response.data[0]['id']
     logger.info(f"Created training run: {run_id}")
     
-    # Define time windows
-    end_date = datetime.now()
-    train_start = end_date - timedelta(days=config.train_days + config.val_days + config.embargo_days)
-    train_end = end_date - timedelta(days=config.val_days + config.embargo_days)
-    val_start = train_end + timedelta(days=config.embargo_days)
-    val_end = end_date
+    # Define time windows based on available data
+    # We have data from 2025-10-02 to 2025-10-03
+    train_start = datetime(2025, 10, 2, 13, 0, 0)
+    train_end = datetime(2025, 10, 3, 0, 0, 0)
+    val_start = datetime(2025, 10, 3, 0, 0, 0)
+    val_end = datetime(2025, 10, 3, 17, 0, 0)
     
     # Load data
     train_trajectories = load_trajectories_from_supabase(
