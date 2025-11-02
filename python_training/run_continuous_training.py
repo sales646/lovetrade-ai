@@ -50,9 +50,12 @@ def run_training(worker_id: int) -> dict:
 
 def main():
     """Run continuous parallel training"""
-    num_workers = 5
+    # GPU memory limit: 3-5 workers max for most GPUs (8-16GB VRAM)
+    # Running too many causes CUBLAS_STATUS_ALLOC_FAILED errors
+    num_workers = 3
     logger.info(f"Starting continuous training with {num_workers} parallel workers")
     logger.info("Press Ctrl+C to stop")
+    logger.info("⚠️  If you get CUDA memory errors, reduce num_workers further")
     
     try:
         while True:
