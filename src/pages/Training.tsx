@@ -112,8 +112,8 @@ export default function Training() {
   const epsilon = qState?.epsilon || latestMetric?.epsilon || 0;
   const qTableSize = qState?.q_table ? Object.keys(qState.q_table).length : 0;
   
-  // Calculate weighted accuracy from expert accuracies
-  const calculateWeightedAccuracy = () => {
+  // Calculate weighted expert imitation accuracy
+  const calculateExpertMatchRate = () => {
     if (!latestMetric?.expert_accuracies) return 0;
     const expertAccs = latestMetric.expert_accuracies as Record<string, number>;
     const weights: Record<string, number> = {
@@ -137,16 +137,16 @@ export default function Training() {
     return totalWeight > 0 ? (totalWeighted / totalWeight) * 100 : 0;
   };
   
-  // Calculate win rate based on positive rewards
-  const calculateWinRate = () => {
-    if (!metrics || metrics.length === 0) return 0;
-    const recentMetrics = metrics.slice(0, 10);
-    const positiveRewards = recentMetrics.filter(m => Number(m.avg_reward) > 0).length;
-    return (positiveRewards / recentMetrics.length) * 100;
+  // Calculate average reward trend (last 20 batches)
+  const calculateAvgRewardTrend = () => {
+    if (!metrics || metrics.length < 2) return 0;
+    const recent = metrics.slice(0, Math.min(20, metrics.length));
+    const avgRecent = recent.reduce((sum, m) => sum + Number(m.avg_reward), 0) / recent.length;
+    return avgRecent;
   };
   
-  const weightedAccuracy = calculateWeightedAccuracy();
-  const winRate = calculateWinRate();
+  const expertMatchRate = calculateExpertMatchRate();
+  const avgRewardTrend = calculateAvgRewardTrend();
 
   // Prepare chart data
   const chartData = metrics?.slice(0, 20).reverse().map((m, i) => ({
@@ -304,25 +304,26 @@ export default function Training() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Accuracy Score</CardTitle>
+            <CardTitle className="text-sm font-medium">Expert Match</CardTitle>
             <Target className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{weightedAccuracy.toFixed(1)}%</div>
-            <Progress value={weightedAccuracy} className="mt-2" />
-            <p className="text-xs text-muted-foreground mt-1">Weighted expert match</p>
+            <div className="text-2xl font-bold">{expertMatchRate.toFixed(1)}%</div>
+            <Progress value={expertMatchRate} className="mt-2" />
+            <p className="text-xs text-muted-foreground mt-1">Imitation accuracy</p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Win Rate</CardTitle>
+            <CardTitle className="text-sm font-medium">Avg Reward (Recent)</CardTitle>
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{winRate.toFixed(1)}%</div>
-            <Progress value={winRate} className="mt-2" />
-            <p className="text-xs text-muted-foreground mt-1">Last 10 episodes</p>
+            <div className={`text-2xl font-bold ${avgRewardTrend >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+              {avgRewardTrend >= 0 ? '+' : ''}{avgRewardTrend.toFixed(2)}
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">Last 20 batches</p>
           </CardContent>
         </Card>
       </div>
