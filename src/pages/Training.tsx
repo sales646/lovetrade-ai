@@ -50,20 +50,20 @@ export default function Training() {
       toast.info("🛑 Autonomous data generation stopped");
     } else {
       // Start auto generation
-      toast.success("🚀 Autonomous data generation started - running every 60 seconds");
+      toast.success("🚀 Autonomous data generation started - running every 30 seconds");
       setIsAutoGenerating(true);
       
       // Run immediately
       handleGenerateData();
       
-      // Then run every 60 seconds
+      // Then run every 30 seconds
       const id = window.setInterval(() => {
         generateData.mutate({
           symbols: ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL"],
           barsPerSymbol: useRealData ? 1000 : 500,
           useRealData,
         });
-      }, 60000); // 60 seconds
+      }, 30000); // 30 seconds
       
       setAutoGenIntervalId(id);
     }
@@ -80,16 +80,16 @@ export default function Training() {
       toast.info("🛑 Autonomous training stopped");
     } else {
       // Start auto training
-      toast.success("🚀 Autonomous training started - running every 60 seconds");
+      toast.success("🚀 Autonomous training started - running every 30 seconds");
       setIsAutoRunning(true);
       
       // Run immediately
       startTraining.mutate(iterations);
       
-      // Then run every 60 seconds
+      // Then run every 30 seconds
       const id = window.setInterval(() => {
         startTraining.mutate(iterations);
-      }, 60000);
+      }, 30000);
       
       setAutoIntervalId(id);
     }
@@ -330,7 +330,7 @@ export default function Training() {
                 <h3 className="text-xl font-bold mb-2">Master Control</h3>
                 <p className="text-sm text-muted-foreground mb-1">
                   {isAutoGenerating && isAutoRunning 
-                    ? "🟢 System fully autonomous - generating data & training every 60s"
+                    ? "🟢 System fully autonomous - generating data & training every 30s"
                     : isAutoGenerating 
                     ? "🟡 Data generation active - start training to complete the loop"
                     : isAutoRunning
@@ -454,7 +454,7 @@ export default function Training() {
               <div className="rounded border border-purple-500/30 bg-purple-500/10 p-2">
                 <div className="font-semibold text-purple-600">Learning Loop</div>
                 <div className="text-muted-foreground mt-1">
-                  • Every 60 seconds<br/>
+                  • Every 30 seconds<br/>
                   • 5 symbols tested<br/>
                   • Q-table updated
                 </div>
