@@ -57,7 +57,7 @@ class TrainingConfig:
     # PPO Training
     ppo_total_timesteps: int = 100000
     ppo_n_steps: int = 2048
-    ppo_batch_size: int = 8192
+    ppo_batch_size: int = 2048
     ppo_learning_rate: float = 3e-4
     ppo_gamma: float = 0.99
     ppo_gae_lambda: float = 0.95
@@ -301,9 +301,11 @@ class TradingEnv(gym.Env):
         obs_dim = config.frame_stack_size * 6  # 6 features per bar
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
     
-    def reset(self):
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            np.random.seed(seed)
         self.current_idx = np.random.randint(0, len(self.trajectories))
-        return self._get_obs()
+        return self._get_obs(), {}
     
     def step(self, action: int):
         # Convert action from {0,1,2} to {-1,0,1}
