@@ -287,13 +287,22 @@ export default function Training() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Profitable Batches</CardTitle>
+            <CardTitle className="text-sm font-medium">Win Rate</CardTitle>
             <Target className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{performanceScore.toFixed(1)}%</div>
-            <Progress value={performanceScore} className="mt-2" />
-            <p className="text-xs text-muted-foreground mt-1">Last 20 batches positive reward</p>
+            <div className="text-2xl font-bold">
+              {latestMetric?.win_rate_pct ? `${Number(latestMetric.win_rate_pct).toFixed(1)}%` : "—"}
+            </div>
+            <Progress 
+              value={latestMetric?.win_rate_pct ? Number(latestMetric.win_rate_pct) : 0} 
+              className="mt-2" 
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              {latestMetric?.winning_trades && latestMetric?.total_trades 
+                ? `${latestMetric.winning_trades}/${latestMetric.total_trades} profitable trades`
+                : "Latest batch"}
+            </p>
           </CardContent>
         </Card>
 

@@ -283,6 +283,8 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
   let lossImitation = 0;
   let actionCounts = { buy: 0, sell: 0, hold: 0 };
   let expertCorrectCounts: Record<string, { correct: number; total: number }> = {};
+  let totalTrades = 0;
+  let winningTrades = 0;
   
   // Simulate through historical bars with REAL trade outcomes
   for (let i = 0; i < bars.length - 15; i++) { // Leave room for trade to complete
@@ -327,6 +329,8 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       );
       reward = tradeResult.reward;
       totalReward += reward;
+      totalTrades++;
+      if (reward > 0) winningTrades++;
       
       // Get state after trade completes
       const exitIdx = Math.min(i + tradeResult.bars_held, bars.length - 1);
@@ -359,6 +363,8 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       );
       reward = tradeResult.reward;
       totalReward += reward;
+      totalTrades++;
+      if (reward > 0) winningTrades++;
       
       // Get state after trade completes
       const exitIdx = Math.min(i + tradeResult.bars_held, bars.length - 1);
@@ -482,7 +488,9 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
   // Combine losses: L_total = α * L_imitation + (1-α) * L_RL
   const lossTotal = qState.alpha_imitation * lossImitation + (1 - qState.alpha_imitation) * lossRL;
   
-  await log("INFO", `Episode complete: ${steps} steps, reward: ${totalReward.toFixed(2)}, L_RL: ${lossRL.toFixed(4)}, L_imit: ${lossImitation.toFixed(4)}, L_total: ${lossTotal.toFixed(4)}`);
+  const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
+  
+  await log("INFO", `Episode complete: ${steps} steps, reward: ${totalReward.toFixed(2)}, Win Rate: ${winRate.toFixed(1)}%, L_RL: ${lossRL.toFixed(4)}, L_imit: ${lossImitation.toFixed(4)}, L_total: ${lossTotal.toFixed(4)}`);
   
   return { 
     reward: totalReward, 
@@ -492,6 +500,9 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
     lossTotal,
     actionCounts,
     expertAccuracies,
+    totalTrades,
+    winningTrades,
+    winRate,
   };
 }
 
@@ -511,6 +522,8 @@ async function runTrainingLoop(iterations: number = 10) {
   let totalLossTotal = 0;
   let aggregateActionCounts = { buy: 0, sell: 0, hold: 0 };
   const aggregateExpertAccuracies: Record<string, number[]> = {};
+  let totalTrades = 0;
+  let totalWinningTrades = 0;
   
   for (let i = 0; i < iterations; i++) {
     // Pick random symbol for each episode
@@ -527,6 +540,10 @@ async function runTrainingLoop(iterations: number = 10) {
     aggregateActionCounts.buy += result.actionCounts.buy;
     aggregateActionCounts.sell += result.actionCounts.sell;
     aggregateActionCounts.hold += result.actionCounts.hold;
+    
+    // Aggregate trade outcomes
+    totalTrades += result.totalTrades || 0;
+    totalWinningTrades += result.winningTrades || 0;
     
     // Aggregate expert accuracies
     for (const [expertName, accuracy] of Object.entries(result.expertAccuracies)) {
@@ -580,6 +597,7 @@ async function runTrainingLoop(iterations: number = 10) {
   const avgLossRL = totalLossRL / iterations;
   const avgLossImitation = totalLossImitation / iterations;
   const avgLossTotal = totalLossTotal / iterations;
+  const batchWinRate = totalTrades > 0 ? (totalWinningTrades / totalTrades) * 100 : 0;
   
   const { data: metricData } = await supabase.from("rl_training_metrics").insert({
     episodes: iterations,
@@ -597,6 +615,9 @@ async function runTrainingLoop(iterations: number = 10) {
     action_sell_pct: actionSellPct,
     action_hold_pct: actionHoldPct,
     expert_accuracies: avgExpertAccuracies,
+    win_rate_pct: batchWinRate,
+    total_trades: totalTrades,
+    winning_trades: totalWinningTrades,
   }).select().single();
   
   // Log per-expert contributions
@@ -629,6 +650,7 @@ async function runTrainingLoop(iterations: number = 10) {
     totalEpisodes: qState.episode_count,
     qTableSize: Object.keys(qState.q_table).length,
     actionDistribution: `BUY:${actionBuyPct.toFixed(1)}% SELL:${actionSellPct.toFixed(1)}% HOLD:${actionHoldPct.toFixed(1)}%`,
+    winRate: `${batchWinRate.toFixed(1)}% (${totalWinningTrades}/${totalTrades})`,
     expertAccuracies: avgExpertAccuracies,
   });
   
@@ -646,6 +668,9 @@ async function runTrainingLoop(iterations: number = 10) {
     qTableSize: Object.keys(qState.q_table).length,
     actionDistribution: { buy: actionBuyPct, sell: actionSellPct, hold: actionHoldPct },
     expertAccuracies: avgExpertAccuracies,
+    winRate: batchWinRate,
+    totalTrades,
+    winningTrades: totalWinningTrades,
   };
 }
 

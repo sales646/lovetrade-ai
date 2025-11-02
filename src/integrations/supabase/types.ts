@@ -532,6 +532,9 @@ export type Database = {
           sharpe_ratio: number | null
           sortino_ratio: number | null
           total_episodes: number
+          total_trades: number | null
+          win_rate_pct: number | null
+          winning_trades: number | null
         }
         Insert: {
           action_buy_pct?: number | null
@@ -553,6 +556,9 @@ export type Database = {
           sharpe_ratio?: number | null
           sortino_ratio?: number | null
           total_episodes: number
+          total_trades?: number | null
+          win_rate_pct?: number | null
+          winning_trades?: number | null
         }
         Update: {
           action_buy_pct?: number | null
@@ -574,6 +580,9 @@ export type Database = {
           sharpe_ratio?: number | null
           sortino_ratio?: number | null
           total_episodes?: number
+          total_trades?: number | null
+          win_rate_pct?: number | null
+          winning_trades?: number | null
         }
         Relationships: []
       }
