@@ -16,6 +16,9 @@ export type Database = {
     Tables: {
       bot_config: {
         Row: {
+          alpaca_api_key: string | null
+          alpaca_paper_trading: boolean | null
+          alpaca_secret_key: string | null
           continuous_learning_enabled: boolean
           id: string
           is_active: boolean
@@ -28,6 +31,9 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          alpaca_api_key?: string | null
+          alpaca_paper_trading?: boolean | null
+          alpaca_secret_key?: string | null
           continuous_learning_enabled?: boolean
           id?: string
           is_active?: boolean
@@ -40,6 +46,9 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          alpaca_api_key?: string | null
+          alpaca_paper_trading?: boolean | null
+          alpaca_secret_key?: string | null
           continuous_learning_enabled?: boolean
           id?: string
           is_active?: boolean

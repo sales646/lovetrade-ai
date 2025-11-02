@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Settings as SettingsIcon, Key, Shield, Database, Download, Upload, Radio } from "lucide-react";
 import { useSettingsStore } from "@/store/settingsStore";
+import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
 export default function Settings() {
@@ -27,12 +29,67 @@ export default function Settings() {
   const [localKeys, setLocalKeys] = useState(apiKeys);
   const [localRisk, setLocalRisk] = useState(riskDefaults);
   const [localWsUrl, setLocalWsUrl] = useState(externalWsUrl);
+  
+  // Alpaca trading credentials (stored in database)
+  const [alpacaApiKey, setAlpacaApiKey] = useState("");
+  const [alpacaSecretKey, setAlpacaSecretKey] = useState("");
+  const [alpacaPaperTrading, setAlpacaPaperTrading] = useState(true);
+  const [loadingAlpaca, setLoadingAlpaca] = useState(false);
+
+  // Load Alpaca credentials from database
+  useEffect(() => {
+    const loadAlpacaCredentials = async () => {
+      const { data, error } = await supabase
+        .from("bot_config")
+        .select("alpaca_api_key, alpaca_secret_key, alpaca_paper_trading")
+        .single();
+      
+      if (data) {
+        setAlpacaApiKey(data.alpaca_api_key || "");
+        setAlpacaSecretKey(data.alpaca_secret_key || "");
+        setAlpacaPaperTrading(data.alpaca_paper_trading ?? true);
+      }
+    };
+    
+    loadAlpacaCredentials();
+  }, []);
 
   const handleSaveKeys = () => {
     updateAPIKey("alpaca", localKeys.alpaca);
     updateAPIKey("polygon", localKeys.polygon);
     updateAPIKey("finnhub", localKeys.finnhub);
     toast.success("API keys saved");
+  };
+
+  const handleSaveAlpacaCredentials = async () => {
+    setLoadingAlpaca(true);
+    try {
+      // Get the current config to update
+      const { data: currentConfig } = await supabase
+        .from("bot_config")
+        .select("id")
+        .single();
+      
+      if (currentConfig) {
+        const { error } = await supabase
+          .from("bot_config")
+          .update({
+            alpaca_api_key: alpacaApiKey,
+            alpaca_secret_key: alpacaSecretKey,
+            alpaca_paper_trading: alpacaPaperTrading,
+          })
+          .eq("id", currentConfig.id);
+
+        if (error) throw error;
+      }
+      
+      toast.success(`Alpaca credentials saved (${alpacaPaperTrading ? "Paper Trading" : "Live Trading"})`);
+    } catch (error) {
+      toast.error("Failed to save Alpaca credentials");
+      console.error(error);
+    } finally {
+      setLoadingAlpaca(false);
+    }
   };
 
   const handleSaveRisk = () => {
@@ -93,43 +150,114 @@ export default function Settings() {
         </div>
       </div>
 
-      <Tabs defaultValue="api-keys" className="space-y-6">
-        <TabsList className="grid w-full grid-cols-4">
-          <TabsTrigger value="api-keys">API Keys</TabsTrigger>
+      <Tabs defaultValue="alpaca" className="space-y-6">
+        <TabsList className="grid w-full grid-cols-5">
+          <TabsTrigger value="alpaca">Alpaca Trading</TabsTrigger>
+          <TabsTrigger value="api-keys">Data APIs</TabsTrigger>
           <TabsTrigger value="data-mode">Data Mode</TabsTrigger>
           <TabsTrigger value="risk">Risk</TabsTrigger>
           <TabsTrigger value="export">Import/Export</TabsTrigger>
         </TabsList>
 
-        {/* API Keys Tab */}
-        <TabsContent value="api-keys">
+        {/* Alpaca Trading Tab */}
+        <TabsContent value="alpaca">
           <Card>
             <CardHeader>
               <div className="flex items-center gap-2">
                 <Key className="h-5 w-5 text-primary" />
-                <CardTitle>API Keys</CardTitle>
+                <CardTitle>Alpaca Trading Credentials</CardTitle>
               </div>
               <CardDescription>
-                Configure your market data provider API keys
+                Configure your Alpaca API credentials for live or paper trading
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
+              <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-4">
+                <p className="text-sm text-yellow-600 dark:text-yellow-400">
+                  <strong>⚠️ Security Notice:</strong> Your API keys are stored securely in the database and used by the autonomous trading bot. Never share these keys publicly.
+                </p>
+              </div>
+
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="alpaca-key">Alpaca API Key</Label>
+                  <Label htmlFor="alpaca-api-key">Alpaca API Key</Label>
                   <Input
-                    id="alpaca-key"
+                    id="alpaca-api-key"
                     type="password"
-                    placeholder="Enter Alpaca API key"
-                    value={localKeys.alpaca}
-                    onChange={(e) => setLocalKeys({ ...localKeys, alpaca: e.target.value })}
+                    placeholder="PKXXXXXXXXXXXXXXXX"
+                    value={alpacaApiKey}
+                    onChange={(e) => setAlpacaApiKey(e.target.value)}
                   />
                   <p className="text-sm text-muted-foreground">
-                    For live trading and real-time market data
+                    Your Alpaca API Key ID
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="alpaca-secret-key">Alpaca Secret Key</Label>
+                  <Input
+                    id="alpaca-secret-key"
+                    type="password"
+                    placeholder="Enter your secret key"
+                    value={alpacaSecretKey}
+                    onChange={(e) => setAlpacaSecretKey(e.target.value)}
+                  />
+                  <p className="text-sm text-muted-foreground">
+                    Your Alpaca Secret Key (keep this private!)
                   </p>
                 </div>
 
                 <Separator />
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="paper-trading">Paper Trading Mode</Label>
+                    <p className="text-sm text-muted-foreground">
+                      {alpacaPaperTrading 
+                        ? "Using paper trading (simulated, no real money)" 
+                        : "⚠️ Using LIVE trading (real money at risk!)"}
+                    </p>
+                  </div>
+                  <Switch
+                    id="paper-trading"
+                    checked={alpacaPaperTrading}
+                    onCheckedChange={setAlpacaPaperTrading}
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-border bg-muted/50 p-4">
+                <h4 className="font-semibold mb-2">How to get Alpaca API keys:</h4>
+                <ol className="space-y-1 text-sm text-muted-foreground list-decimal list-inside">
+                  <li>Create an account at <a href="https://alpaca.markets" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">alpaca.markets</a></li>
+                  <li>Navigate to your account dashboard</li>
+                  <li>Generate API keys for Paper Trading or Live Trading</li>
+                  <li>Copy both the API Key ID and Secret Key</li>
+                  <li>Paste them here and save</li>
+                </ol>
+              </div>
+
+              <Button onClick={handleSaveAlpacaCredentials} disabled={loadingAlpaca}>
+                {loadingAlpaca ? "Saving..." : "Save Alpaca Credentials"}
+              </Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Data API Keys Tab */}
+        <TabsContent value="api-keys">
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <Database className="h-5 w-5 text-primary" />
+                <CardTitle>Market Data API Keys</CardTitle>
+              </div>
+              <CardDescription>
+                Configure your market data provider API keys (optional)
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="space-y-4">
 
                 <div className="space-y-2">
                   <Label htmlFor="polygon-key">Polygon.io API Key</Label>

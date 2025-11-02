@@ -6,6 +6,10 @@ const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+// Alpaca API configuration
+const ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets";
+const ALPACA_LIVE_BASE_URL = "https://api.alpaca.markets";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -21,6 +25,73 @@ async function log(level: "INFO" | "WARN" | "ERROR", message: string, metadata?:
     message,
     metadata: metadata || {},
   });
+}
+
+async function getAlpacaCredentials() {
+  const { data: config } = await supabase
+    .from("bot_config")
+    .select("alpaca_api_key, alpaca_secret_key, alpaca_paper_trading")
+    .single();
+  
+  if (!config?.alpaca_api_key || !config?.alpaca_secret_key) {
+    return null;
+  }
+  
+  return {
+    apiKey: config.alpaca_api_key,
+    secretKey: config.alpaca_secret_key,
+    isPaperTrading: config.alpaca_paper_trading ?? true,
+    baseUrl: config.alpaca_paper_trading ? ALPACA_PAPER_BASE_URL : ALPACA_LIVE_BASE_URL,
+  };
+}
+
+async function placeAlpacaOrder(credentials: any, order: any) {
+  const headers = {
+    "APCA-API-KEY-ID": credentials.apiKey,
+    "APCA-API-SECRET-KEY": credentials.secretKey,
+    "Content-Type": "application/json",
+  };
+  
+  const orderPayload = {
+    symbol: order.symbol,
+    qty: order.quantity,
+    side: order.side, // "buy" or "sell"
+    type: "market",
+    time_in_force: "day",
+  };
+  
+  await log("INFO", `Placing Alpaca order: ${order.side} ${order.quantity} ${order.symbol}`);
+  
+  const response = await fetch(`${credentials.baseUrl}/v2/orders`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(orderPayload),
+  });
+  
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Alpaca order failed: ${error}`);
+  }
+  
+  return await response.json();
+}
+
+async function getAlpacaAccount(credentials: any) {
+  const headers = {
+    "APCA-API-KEY-ID": credentials.apiKey,
+    "APCA-API-SECRET-KEY": credentials.secretKey,
+  };
+  
+  const response = await fetch(`${credentials.baseUrl}/v2/account`, {
+    method: "GET",
+    headers,
+  });
+  
+  if (!response.ok) {
+    throw new Error("Failed to fetch Alpaca account");
+  }
+  
+  return await response.json();
 }
 
 async function calculatePositionSize(signal: any, rlDecision: any, accountState: any) {
@@ -107,11 +178,18 @@ async function runTradingLoop(loopNumber: number) {
   try {
     await log("INFO", `🚀 Trading loop #${loopNumber} started`);
     
-    // Fetch bot config
+    // Fetch bot config and Alpaca credentials
     const { data: config } = await supabase
       .from("bot_config")
       .select("*")
       .single();
+    
+    const alpacaCredentials = await getAlpacaCredentials();
+    if (!alpacaCredentials) {
+      await log("WARN", "⚠️ Alpaca credentials not configured - trading disabled. Please configure in Settings.");
+    } else {
+      await log("INFO", `🔑 Alpaca connected (${alpacaCredentials.isPaperTrading ? "Paper Trading" : "LIVE Trading"})`);
+    }
       
     // Fetch existing positions
     const { data: positions } = await supabase
@@ -120,18 +198,48 @@ async function runTradingLoop(loopNumber: number) {
       
     const currentPositions = positions || [];
     
-    // Calculate account state
-    const totalPnL = currentPositions.reduce((sum, p) => sum + (p.unrealized_pnl || 0), 0);
-    const initialEquity = 100000; // Mock initial equity
-    const currentEquity = initialEquity + totalPnL;
-    const drawdown = Math.abs(Math.min(0, (currentEquity - initialEquity) / initialEquity * 100));
-    
-    const accountState = {
-      equity: currentEquity,
-      drawdown,
-      open_positions: currentPositions.length,
-      max_positions: config?.max_concurrent_positions || 5,
-    };
+    // Get real account state from Alpaca if available
+    let accountState;
+    if (alpacaCredentials) {
+      try {
+        const alpacaAccount = await getAlpacaAccount(alpacaCredentials);
+        const equity = parseFloat(alpacaAccount.equity);
+        const lastEquity = parseFloat(alpacaAccount.last_equity);
+        const drawdown = Math.abs(Math.min(0, (equity - lastEquity) / lastEquity * 100));
+        
+        accountState = {
+          equity,
+          drawdown,
+          open_positions: currentPositions.length,
+          max_positions: config?.max_concurrent_positions || 5,
+          buying_power: parseFloat(alpacaAccount.buying_power),
+        };
+        
+        await log("INFO", `💰 Account: $${equity.toFixed(2)} equity, ${accountState.open_positions} positions`);
+      } catch (error) {
+        await log("ERROR", "Failed to fetch Alpaca account", { error });
+        // Fallback to mock data
+        accountState = {
+          equity: 100000,
+          drawdown: 0,
+          open_positions: currentPositions.length,
+          max_positions: config?.max_concurrent_positions || 5,
+        };
+      }
+    } else {
+      // Mock account state
+      const totalPnL = currentPositions.reduce((sum, p) => sum + (p.unrealized_pnl || 0), 0);
+      const initialEquity = 100000;
+      const currentEquity = initialEquity + totalPnL;
+      const drawdown = Math.abs(Math.min(0, (currentEquity - initialEquity) / initialEquity * 100));
+      
+      accountState = {
+        equity: currentEquity,
+        drawdown,
+        open_positions: currentPositions.length,
+        max_positions: config?.max_concurrent_positions || 5,
+      };
+    }
     
     // 1. CONTINUOUS LEARNING (always runs)
     if (config?.continuous_learning_enabled) {
@@ -251,7 +359,30 @@ async function runTradingLoop(loopNumber: number) {
       if (riskAssessment.shouldExecute) {
         await log("INFO", `✅ Placing order: ${signal.action.toUpperCase()} ${riskAssessment.adjustedSize.toFixed(0)}% ${signal.symbol}`);
         
-        // Create trade
+        // Calculate quantity based on position size percentage and account equity
+        const dollarAmount = (accountState.equity * riskAssessment.adjustedSize) / 100;
+        const quantity = Math.floor(dollarAmount / signal.market_data.price);
+        
+        // Place real Alpaca order if credentials are configured
+        let alpacaOrderId = null;
+        if (alpacaCredentials && quantity > 0) {
+          try {
+            const alpacaOrder = await placeAlpacaOrder(alpacaCredentials, {
+              symbol: signal.symbol,
+              quantity,
+              side: signal.action, // "buy" or "sell"
+            });
+            alpacaOrderId = alpacaOrder.id;
+            await log("INFO", `🎯 Alpaca order placed: ${alpacaOrder.id}`);
+          } catch (error) {
+            await log("ERROR", `Failed to place Alpaca order for ${signal.symbol}`, { error });
+            // Continue anyway to track in our system
+          }
+        } else if (!alpacaCredentials) {
+          await log("INFO", "📝 Simulated order (Alpaca not configured)");
+        }
+        
+        // Create trade record
         await supabase.from("trades").insert({
           signal_id: signal.id,
           risk_assessment_id: savedAssessment.id,
@@ -260,6 +391,7 @@ async function runTradingLoop(loopNumber: number) {
           size: riskAssessment.adjustedSize,
           entry_price: signal.market_data.price,
           status: "open",
+          metadata: { alpaca_order_id: alpacaOrderId, quantity },
         });
         
         // Create/update position
@@ -269,6 +401,7 @@ async function runTradingLoop(loopNumber: number) {
           size: riskAssessment.adjustedSize,
           entry_price: signal.market_data.price,
           current_price: signal.market_data.price,
+          quantity,
         });
         
         tradesPlaced++;
