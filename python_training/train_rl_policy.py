@@ -40,10 +40,10 @@ class TrainingConfig:
     # Data
     symbols: List[str] = None
     timeframe: str = "5m"
-    train_days: int = 365
-    val_days: int = 90
-    test_days: int = 90
-    embargo_days: int = 3
+    train_days: int = 20
+    val_days: int = 7
+    test_days: int = 3
+    embargo_days: int = 1
     
     # Features
     frame_stack_size: int = 32
