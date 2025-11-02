@@ -6,9 +6,9 @@ export function useGenerateTrainingData() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: async ({ symbols, barsPerSymbol }: { symbols: string[]; barsPerSymbol: number }) => {
+    mutationFn: async ({ symbols, barsPerSymbol, useRealData }: { symbols: string[]; barsPerSymbol: number; useRealData?: boolean }) => {
       const { data, error } = await supabase.functions.invoke("auto-data-generator", {
-        body: { symbols, bars_per_symbol: barsPerSymbol },
+        body: { symbols, bars_per_symbol: barsPerSymbol, use_real_data: useRealData },
       });
 
       if (error) throw error;

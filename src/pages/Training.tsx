@@ -19,6 +19,7 @@ export default function Training() {
   const [autoIntervalId, setAutoIntervalId] = useState<number | null>(null);
   const [isAutoGenerating, setIsAutoGenerating] = useState(false);
   const [autoGenIntervalId, setAutoGenIntervalId] = useState<number | null>(null);
+  const [useRealData, setUseRealData] = useState(false);
   
   const startTraining = useStartAutonomousTraining();
   const generateData = useGenerateTrainingData();
@@ -32,8 +33,9 @@ export default function Training() {
 
   const handleGenerateData = () => {
     generateData.mutate({
-      symbols: ["AAPL", "TSLA", "MSFT", "GOOGL", "AMZN"],
-      barsPerSymbol: 500,
+      symbols: ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL"],
+      barsPerSymbol: useRealData ? 1000 : 500,
+      useRealData,
     });
   };
 
@@ -56,7 +58,11 @@ export default function Training() {
       
       // Then run every 60 seconds
       const id = window.setInterval(() => {
-        handleGenerateData();
+        generateData.mutate({
+          symbols: ["AAPL", "TSLA", "NVDA", "MSFT", "GOOGL"],
+          barsPerSymbol: useRealData ? 1000 : 500,
+          useRealData,
+        });
       }, 60000); // 60 seconds
       
       setAutoGenIntervalId(id);
@@ -261,7 +267,7 @@ export default function Training() {
                 Automatic Data Generation
               </CardTitle>
               <CardDescription>
-                Generate synthetic training data for both cloud and local Python training
+                Generate training data from {useRealData ? "real market history" : "synthetic scenarios"}
               </CardDescription>
             </div>
             {isAutoGenerating && (
@@ -274,12 +280,30 @@ export default function Training() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
+            <div className="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+              <div className="flex items-center gap-2">
+                <Badge variant={useRealData ? "default" : "secondary"}>
+                  {useRealData ? "Real Market Data" : "Synthetic Data"}
+                </Badge>
+                <span className="text-sm text-muted-foreground">
+                  {useRealData ? "Using Yahoo Finance historical data" : "Using AI-generated scenarios"}
+                </span>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setUseRealData(!useRealData)}
+              >
+                Switch to {useRealData ? "Synthetic" : "Real Data"}
+              </Button>
+            </div>
+            
             <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
               <div className="flex items-center justify-between mb-3">
                 <div>
                   <h4 className="font-semibold mb-1">🎲 Manual Generation</h4>
                   <p className="text-sm text-muted-foreground">
-                    Creates 500 bars + indicators + expert trajectories for 5 symbols
+                    Creates {useRealData ? "1000 real market bars" : "500 synthetic bars"} + indicators + expert trajectories for 5 symbols
                   </p>
                 </div>
                 <Button

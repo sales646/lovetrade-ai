@@ -365,6 +365,96 @@ function generateExpertTrajectories(symbol: string, bars: any[], indicators: any
   return trajectories;
 }
 
+async function generateDataFromRealBars(symbol: string, limitBars?: number) {
+  // Fetch real historical bars from database
+  let query = supabase
+    .from("historical_bars")
+    .select("*")
+    .eq("symbol", symbol)
+    .order("timestamp", { ascending: true });
+
+  if (limitBars) {
+    query = query.limit(limitBars);
+  }
+
+  const { data: realBars, error: fetchError } = await query;
+
+  if (fetchError) {
+    await log("ERROR", `Failed to fetch real bars for ${symbol}`, { error: fetchError.message });
+    throw fetchError;
+  }
+
+  if (!realBars || realBars.length === 0) {
+    await log("WARN", `No real data found for ${symbol}. Fetch market data first.`, { symbol });
+    return { bars: 0, indicators: 0, trajectories: 0 };
+  }
+
+  await log("INFO", `Found ${realBars.length} real bars for ${symbol}`, { symbol, count: realBars.length });
+
+  // Transform to match expected format
+  const formattedBars = realBars.map(bar => ({
+    open: Number(bar.open),
+    high: Number(bar.high),
+    low: Number(bar.low),
+    close: Number(bar.close),
+    volume: Number(bar.volume),
+    timestamp: new Date(bar.timestamp),
+    regime: "REAL_MARKET" // Mark as real data
+  }));
+
+  // Calculate indicators on real data
+  const indicators = calculateTechnicalIndicators(formattedBars);
+
+  // Generate expert trajectories from real bars + indicators
+  const trajectories = generateExpertTrajectories(symbol, formattedBars, indicators);
+
+  // Insert indicators
+  const indicatorInserts = indicators.map((ind) => ({
+    symbol,
+    timeframe: "5m",
+    timestamp: ind.timestamp.toISOString(),
+    rsi_14: ind.rsi_14,
+    atr_14: ind.atr_14,
+    vwap: ind.vwap,
+    vwap_distance_pct: ind.vwap_distance_pct,
+    ema_20: ind.ema_20,
+    ema_50: ind.ema_50,
+    volume_zscore: ind.volume_zscore,
+    intraday_position: ind.intraday_position,
+    range_pct: ind.range_pct,
+  }));
+
+  for (let i = 0; i < indicatorInserts.length; i += 100) {
+    const batch = indicatorInserts.slice(i, i + 100);
+    await supabase.from("technical_indicators").upsert(batch, { onConflict: "symbol,timeframe,timestamp" });
+  }
+
+  // Insert trajectories
+  for (let i = 0; i < trajectories.length; i += 100) {
+    const batch = trajectories.slice(i, i + 100);
+    await supabase.from("expert_trajectories").insert(batch);
+  }
+
+  // Update symbol metadata
+  await supabase.from("symbols").upsert({
+    symbol,
+    is_active: true,
+    last_fetched: new Date().toISOString(),
+  });
+
+  await log("INFO", `Generated ${indicators.length} indicators and ${trajectories.length} trajectories from real data`, {
+    symbol,
+    indicators: indicators.length,
+    trajectories: trajectories.length,
+  });
+
+  return {
+    bars: realBars.length,
+    indicators: indicators.length,
+    trajectories: trajectories.length,
+  };
+}
+
 async function generateDataForSymbol(symbol: string, numBars: number = 500) {
   await log("INFO", `📊 Generating ${numBars} bars for ${symbol}...`);
   
@@ -463,15 +553,21 @@ serve(async (req) => {
   }
 
   try {
-    const { symbols = ["AAPL", "TSLA", "MSFT", "GOOGL", "AMZN"], bars_per_symbol = 500 } = await req.json().catch(() => ({}));
+    const { symbols = ["AAPL", "TSLA", "MSFT", "GOOGL", "AMZN"], bars_per_symbol = 500, use_real_data = false } = await req.json().catch(() => ({}));
     
     await log("INFO", `🚀 Auto data generator started for ${symbols.length} symbols`);
     
     const results = [];
     
     for (const symbol of symbols) {
-      const result = await generateDataForSymbol(symbol, bars_per_symbol);
-      results.push({ symbol, ...result });
+      if (use_real_data) {
+        await log("INFO", `Using real market data for ${symbol}`, { symbol, use_real_data });
+        const result = await generateDataFromRealBars(symbol, bars_per_symbol);
+        results.push({ symbol, ...result });
+      } else {
+        const result = await generateDataForSymbol(symbol, bars_per_symbol);
+        results.push({ symbol, ...result });
+      }
     }
     
     const totalBars = results.reduce((sum, r) => sum + r.bars, 0);
