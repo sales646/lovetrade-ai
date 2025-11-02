@@ -166,9 +166,9 @@ export default function Training() {
               <Brain className="h-8 w-8 text-primary" />
             </div>
             <div>
-              <h2 className="mb-2 text-3xl font-bold">Autonomous RL Training</h2>
+              <h2 className="mb-2 text-3xl font-bold">Autonomous RL Trading</h2>
               <p className="text-muted-foreground">
-                Continuous Q-Learning with epsilon-greedy exploration and reward shaping
+                Aggressive 4:1 R:R strategy with outcome-based rewards from real P&L
               </p>
             </div>
           </div>
@@ -180,6 +180,76 @@ export default function Training() {
           )}
         </div>
       </div>
+
+      {/* System Flow Visualization */}
+      <Card className="border-primary/20">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Activity className="h-5 w-5 text-primary" />
+            System Architecture
+          </CardTitle>
+          <CardDescription>How the aggressive trading strategy learns from real outcomes</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            <div className="bg-muted/30 rounded-lg p-4 overflow-x-auto">
+              <pre className="text-xs font-mono whitespace-pre">
+{`graph TB
+    A[Market Data] -->|Yahoo Finance / Synthetic| B[OHLCV Bars]
+    B --> C[Technical Indicators]
+    C -->|RSI ATR VWAP EMAs| D{Signal Detection}
+    
+    D -->|RSI 30 Trend Up| E1[BUY Signal]
+    D -->|VWAP Distance -1.5%| E2[VWAP Reversion]
+    D -->|Strong Trend Pullback| E3[Trend Entry]
+    
+    E1 --> F[Trade Simulation]
+    E2 --> F
+    E3 --> F
+    
+    F -->|Entry at Signal| G[Walk Through Bars]
+    G --> H{Exit Condition?}
+    
+    H -->|Low Stop 1.5xATR| I1[Stop Loss -2.5%]
+    H -->|High Target 6xATR| I2[Take Profit +10%]
+    H -->|Max 10-15 Bars| I3[Time Exit 0%]
+    
+    I1 --> J[Calculate P&L]
+    I2 --> J
+    I3 --> J
+    
+    J -->|Net - Fees Slip| K[Real Reward]
+    K -->|+5% = +1.5 reward| L[Q-Learning Update]
+    K -->|-2.5% = -0.75 reward| L
+    
+    L --> M[Improved Policy]
+    M -->|Every 60s| A`}
+              </pre>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="rounded-lg border border-border bg-muted/30 p-3">
+                <div className="font-semibold mb-2">⚡ Aggressive Settings</div>
+                <div className="space-y-1 text-muted-foreground">
+                  <div>• Stop: <span className="text-red-500 font-mono">1.5×ATR</span> (tight)</div>
+                  <div>• Target: <span className="text-green-500 font-mono">6×ATR</span> (4:1 R:R)</div>
+                  <div>• Max Hold: <span className="font-mono">10-15 bars</span></div>
+                  <div>• Fees: <span className="font-mono">0.12%</span> | Slip: <span className="font-mono">0.08%</span></div>
+                </div>
+              </div>
+              <div className="rounded-lg border border-border bg-muted/30 p-3">
+                <div className="font-semibold mb-2">🎯 Real Outcomes</div>
+                <div className="space-y-1 text-muted-foreground">
+                  <div>• Backtested through actual bars</div>
+                  <div>• Stop/target checked each bar</div>
+                  <div>• Real P&L → Reward mapping</div>
+                  <div>• No fake "setup quality" scores</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Stats */}
       <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
@@ -260,306 +330,190 @@ export default function Training() {
       {/* Data Generation */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <Database className="h-5 w-5 text-primary" />
-                Automatic Data Generation
-              </CardTitle>
-              <CardDescription>
-                Generate training data from {useRealData ? "real market history" : "synthetic scenarios"}
-              </CardDescription>
-            </div>
-            {isAutoGenerating && (
-              <Badge variant="default" className="animate-pulse">
-                <RefreshCw className="mr-1 h-3 w-3" />
-                Auto-Generating
-              </Badge>
-            )}
-          </div>
+          <CardTitle className="flex items-center gap-2">
+            <Zap className="h-5 w-5 text-primary" />
+            Autonomous Trading System
+          </CardTitle>
+          <CardDescription>
+            One-click control for the entire training pipeline
+          </CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            <div className="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
-              <div className="flex items-center gap-2">
-                <Badge variant={useRealData ? "default" : "secondary"}>
-                  {useRealData ? "Real Market Data" : "Synthetic Data"}
-                </Badge>
-                <span className="text-sm text-muted-foreground">
-                  {useRealData ? "Using Yahoo Finance historical data" : "Using AI-generated scenarios"}
-                </span>
+        <CardContent className="space-y-6">
+          {/* Master Control */}
+          <div className="rounded-lg border-2 border-primary/30 bg-gradient-to-br from-primary/10 to-primary/5 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-xl font-bold mb-2">Master Control</h3>
+                <p className="text-sm text-muted-foreground mb-1">
+                  {isAutoGenerating && isAutoRunning 
+                    ? "🟢 System fully autonomous - generating data & training every 60s"
+                    : isAutoGenerating 
+                    ? "🟡 Data generation active - start training to complete the loop"
+                    : isAutoRunning
+                    ? "🟡 Training active - start data generation to complete the loop"
+                    : "⚪ System idle - click Start to begin"}
+                </p>
+                <div className="flex gap-2 mt-2">
+                  <Badge variant={useRealData ? "default" : "secondary"} className="text-xs">
+                    {useRealData ? "Real Market Data" : "Synthetic Data"}
+                  </Badge>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setUseRealData(!useRealData)}
+                    className="h-6 px-2 text-xs"
+                  >
+                    Switch
+                  </Button>
+                </div>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setUseRealData(!useRealData)}
-              >
-                Switch to {useRealData ? "Synthetic" : "Real Data"}
-              </Button>
+              <div className="flex flex-col gap-2">
+                <Button
+                  onClick={() => {
+                    if (!isAutoGenerating) handleToggleAutoGeneration();
+                    if (!isAutoRunning) handleToggleAutoTraining();
+                  }}
+                  disabled={(isAutoGenerating && isAutoRunning) || generateData.isPending || startTraining.isPending}
+                  size="lg"
+                  className="min-w-[140px]"
+                >
+                  {(isAutoGenerating && isAutoRunning) ? (
+                    <>
+                      <Activity className="mr-2 h-5 w-5 animate-pulse" />
+                      Running
+                    </>
+                  ) : (
+                    <>
+                      <Play className="mr-2 h-5 w-5" />
+                      Start System
+                    </>
+                  )}
+                </Button>
+                {(isAutoGenerating || isAutoRunning) && (
+                  <Button
+                    onClick={() => {
+                      if (isAutoGenerating) handleToggleAutoGeneration();
+                      if (isAutoRunning) handleToggleAutoTraining();
+                    }}
+                    variant="destructive"
+                    size="lg"
+                    className="min-w-[140px]"
+                  >
+                    <Pause className="mr-2 h-5 w-5" />
+                    Stop All
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* System Visualization */}
+          <div className="rounded-lg border border-border bg-muted/30 p-4">
+            <h4 className="font-semibold mb-3 flex items-center gap-2">
+              <Brain className="h-4 w-4 text-primary" />
+              Aggressive Trading System Flow
+            </h4>
+            <div className="bg-card rounded-lg p-4 mb-4">
+              <div className="text-xs font-mono space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-green-500">1.</span>
+                  <span>Market Data → Real/Synthetic OHLCV bars</span>
+                </div>
+                <div className="flex items-center gap-2 ml-4">
+                  <span className="text-blue-500">↓</span>
+                  <span>Calculate RSI, ATR, VWAP, EMAs</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-green-500">2.</span>
+                  <span>Signal Detection → RSI_EMA, VWAP_REVERSION, TREND_PULLBACK</span>
+                </div>
+                <div className="flex items-center gap-2 ml-4">
+                  <span className="text-blue-500">↓</span>
+                  <span>Trade Simulation → Entry at signal, track through bars</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-green-500">3.</span>
+                  <span>Exit Logic → Stop: 1.5×ATR | Target: 6×ATR | Max: 10-15 bars</span>
+                </div>
+                <div className="flex items-center gap-2 ml-4">
+                  <span className="text-blue-500">↓</span>
+                  <span>P&L Calculation → (Exit - Entry) - Fees (0.12%) - Slippage (0.08%)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-green-500">4.</span>
+                  <span>Reward Assignment → +5% = +1.5 reward | -2.5% = -0.75 reward</span>
+                </div>
+                <div className="flex items-center gap-2 ml-4">
+                  <span className="text-blue-500">↓</span>
+                  <span>Q-Learning → Update action values based on real outcomes</span>
+                </div>
+              </div>
             </div>
             
-            <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
-              <div className="flex items-center justify-between mb-3">
-                <div>
-                  <h4 className="font-semibold mb-1">🎲 Manual Generation</h4>
-                  <p className="text-sm text-muted-foreground">
-                    Creates {useRealData ? "1000 real market bars" : "500 synthetic bars"} + indicators + expert trajectories for 5 symbols
-                  </p>
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="rounded border border-green-500/30 bg-green-500/10 p-2">
+                <div className="font-semibold text-green-600">Aggressive Profile</div>
+                <div className="text-muted-foreground mt-1">
+                  • Tight 1.5×ATR stops<br/>
+                  • Big 6×ATR targets (4:1)<br/>
+                  • Fast 10-15 bar exits
                 </div>
-                <Button
-                  onClick={handleGenerateData}
-                  disabled={generateData.isPending || isAutoGenerating}
-                  size="lg"
-                >
-                  {generateData.isPending ? (
-                    <>
-                      <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                      Generating...
-                    </>
-                  ) : (
-                    <>
-                      <Database className="mr-2 h-4 w-4" />
-                      Generate Once
-                    </>
-                  )}
-                </Button>
               </div>
-              
-              <div className="pt-3 border-t border-primary/10 flex items-center justify-between">
-                <div>
-                  <h4 className="font-semibold mb-1">🤖 Autonomous Generation</h4>
-                  <p className="text-sm text-muted-foreground">
-                    Runs every 60 seconds continuously
-                  </p>
+              <div className="rounded border border-blue-500/30 bg-blue-500/10 p-2">
+                <div className="font-semibold text-blue-600">Real Outcomes</div>
+                <div className="text-muted-foreground mt-1">
+                  • Backtested P&L<br/>
+                  • Not rule-based scores<br/>
+                  • Actual win/loss data
                 </div>
-                <Button
-                  onClick={handleToggleAutoGeneration}
-                  variant={isAutoGenerating ? "destructive" : "default"}
-                  disabled={generateData.isPending}
-                >
-                  {isAutoGenerating ? (
-                    <>
-                      <Pause className="mr-2 h-4 w-4" />
-                      Stop Auto
-                    </>
-                  ) : (
-                    <>
-                      <Play className="mr-2 h-4 w-4" />
-                      Start Auto
-                    </>
-                  )}
-                </Button>
               </div>
-            </div>
-
-            <div className="rounded-lg border border-border bg-muted/50 p-4">
-              <h4 className="font-semibold mb-3">📊 Realistic Multi-Market Scenario Generation:</h4>
-              
-              <div className="space-y-3">
-                <div>
-                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">1.</span> Market Regime Detection
-                  </h5>
-                  <p className="text-xs text-muted-foreground ml-5">
-                    Each symbol cycles through 7 realistic market regimes: <strong>STRONG_TREND_UP/DOWN</strong> (clear trends), 
-                    <strong>WEAK_TREND_UP/DOWN</strong> (uncertain trends), <strong>SIDEWAYS</strong> (ranging), 
-                    <strong>CHOPPY</strong> (whipsaws), <strong>HIGH_VOLATILITY</strong> (erratic). Regimes last 30-100 bars.
-                  </p>
-                </div>
-                
-                <div>
-                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">2.</span> Realistic Price Patterns
-                  </h5>
-                  <p className="text-xs text-muted-foreground ml-5">
-                    Price drifts, volatility, and volume adapt to regime. Strong trends have 0.2% drift/bar with 1% vol. 
-                    Choppy markets have random 0.1% swings with 2% vol. High vol has 3% swings.
-                  </p>
-                </div>
-                
-                <div>
-                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">3.</span> Regime-Aware Expert Strategies
-                  </h5>
-                  <ul className="space-y-1 text-xs text-muted-foreground ml-5">
-                    <li className="flex items-start gap-2">
-                      <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
-                      <span><strong>RSI_EMA:</strong> Only trades in TREND regimes (quality 0.9), skips choppy/sideways</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
-                      <span><strong>VWAP_REVERSION:</strong> Avoids CHOPPY regime entirely (quality 0.2-0.8)</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <div className="h-1 w-1 rounded-full bg-primary mt-1.5" />
-                      <span><strong>TREND_PULLBACK:</strong> Only fires in STRONG_TREND regimes (quality 0.9)</span>
-                    </li>
-                  </ul>
-                </div>
-                
-                <div>
-                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">4.</span> Balanced Reward Structure (CRITICAL)
-                  </h5>
-                  <p className="text-xs text-muted-foreground ml-5 mb-2">
-                    <strong>Good conditions (TREND regimes):</strong><br/>
-                    • Trading: <span className="text-green-500">+0.6 to +2.5</span> rewards (profitable)<br/>
-                    • HOLDing: <span className="text-red-400">-0.1</span> (slight penalty, encourages action)<br/>
-                    → Bot learns: <strong>TRADE and earn money</strong>
-                  </p>
-                  <p className="text-xs text-muted-foreground ml-5">
-                    <strong>Bad conditions (CHOPPY/HIGH_VOL/SIDEWAYS):</strong><br/>
-                    • Trading: <span className="text-red-400">-0.3 to -1.0</span> (losses from whipsaws)<br/>
-                    • HOLDing: <span className="text-green-500">+0.2</span> (reward for staying out)<br/>
-                    → Bot learns: <strong>STAY OUT and preserve capital</strong>
-                  </p>
-                </div>
-                
-                <div>
-                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">5.</span> Stay-Out Learning
-                  </h5>
-                  <p className="text-xs text-muted-foreground ml-5">
-                    <strong>60% HOLD probability</strong> in CHOPPY/HIGH_VOL/SIDEWAYS vs 15% in good conditions. 
-                    Entry quality: 0.85 for HOLD in bad conditions vs 0.2 in good conditions. Teaches bot to recognize 
-                    when markets are untradeable.
-                  </p>
-                </div>
-                
-                <div>
-                  <h5 className="font-medium text-sm mb-1 flex items-center gap-2">
-                    <span className="text-primary">6.</span> Quality & Risk Scaling
-                  </h5>
-                  <p className="text-xs text-muted-foreground ml-5">
-                    Entry quality, R:R ratios, and equity changes scale by regime. Strong trends get 0.9 quality with 2.5 R:R. 
-                    Choppy markets get 0.2 quality with 0.5 R:R. Bad trades also include higher slippage (0.08-0.1 vs 0.05).
-                  </p>
-                </div>
-                
-                <div className="pt-2 border-t border-primary/10">
-                  <p className="text-xs font-medium text-primary">
-                    🎯 Result: Bot learns to scan 5 symbols simultaneously, identify which are in good vs bad regimes, 
-                    and only take high-quality trades while staying out of choppy/unclear markets.
-                  </p>
+              <div className="rounded border border-purple-500/30 bg-purple-500/10 p-2">
+                <div className="font-semibold text-purple-600">Learning Loop</div>
+                <div className="text-muted-foreground mt-1">
+                  • Every 60 seconds<br/>
+                  • 5 symbols tested<br/>
+                  • Q-table updated
                 </div>
               </div>
             </div>
           </div>
-        </CardContent>
-      </Card>
 
-      {/* Training Control */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <Zap className="h-5 w-5 text-primary" />
-                Training Controls
-              </CardTitle>
-              <CardDescription>
-                Start manual training sessions or enable fully autonomous mode
-              </CardDescription>
-            </div>
-            {isAutoRunning && (
-              <Badge variant="default" className="animate-pulse">
-                <Activity className="mr-1 h-3 w-3" />
-                Auto-Running
-              </Badge>
-            )}
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-6">
-            {/* Manual Training */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-4">
-                <div className="flex-1">
-                  <Label htmlFor="iterations">Episodes per run</Label>
+          {/* Manual Override */}
+          <details className="rounded-lg border border-border">
+            <summary className="cursor-pointer p-4 font-semibold hover:bg-muted/50">
+              Advanced: Manual Controls
+            </summary>
+            <div className="p-4 pt-0 space-y-4 border-t">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="font-semibold">Data Generation</h4>
+                  <p className="text-xs text-muted-foreground">Generate {useRealData ? "1000 real" : "500 synthetic"} bars for 5 symbols</p>
+                </div>
+                <Button onClick={handleGenerateData} disabled={generateData.isPending} size="sm">
+                  {generateData.isPending ? "Generating..." : "Generate Once"}
+                </Button>
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="font-semibold">Training Session</h4>
+                  <p className="text-xs text-muted-foreground">Run {iterations} training episodes</p>
+                </div>
+                <div className="flex gap-2 items-center">
                   <Input
-                    id="iterations"
                     type="number"
                     min="1"
                     max="100"
                     value={iterations}
                     onChange={(e) => setIterations(parseInt(e.target.value) || 10)}
-                    disabled={isAutoRunning}
+                    className="w-20 h-9"
                   />
-                </div>
-                <div className="flex-1 flex items-end">
-                  <Button 
-                    onClick={handleStartTraining}
-                    disabled={startTraining.isPending || isAutoRunning}
-                    className="w-full"
-                  >
-                    <Play className="mr-2 h-4 w-4" />
-                    {startTraining.isPending ? "Training..." : "Run Training"}
+                  <Button onClick={handleStartTraining} disabled={startTraining.isPending} size="sm">
+                    {startTraining.isPending ? "Training..." : "Train Once"}
                   </Button>
                 </div>
               </div>
             </div>
-
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <span className="w-full border-t" />
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-card px-2 text-muted-foreground">Or</span>
-              </div>
-            </div>
-
-            {/* Autonomous Mode */}
-            <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="font-semibold mb-1">🤖 Fully Autonomous Mode</h4>
-                  <p className="text-sm text-muted-foreground">
-                    Runs {iterations} episodes every 60 seconds continuously
-                  </p>
-                </div>
-                <Button
-                  onClick={handleToggleAutoTraining}
-                  variant={isAutoRunning ? "destructive" : "default"}
-                  disabled={startTraining.isPending}
-                >
-                  {isAutoRunning ? (
-                    <>
-                      <Pause className="mr-2 h-4 w-4" />
-                      Stop Auto
-                    </>
-                  ) : (
-                    <>
-                      <Play className="mr-2 h-4 w-4" />
-                      Start Auto
-                    </>
-                  )}
-                </Button>
-              </div>
-            </div>
-
-            {/* Info Box */}
-            <div className="rounded-lg border border-border bg-muted/50 p-4">
-              <h4 className="font-semibold mb-2">How it works:</h4>
-              <ul className="space-y-1 text-sm text-muted-foreground">
-                <li className="flex items-start gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
-                  <span><strong>Q-Learning:</strong> Learns optimal actions for each market state</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
-                  <span><strong>Epsilon-greedy:</strong> Balances exploration (random) vs exploitation (best known)</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
-                  <span><strong>Reward shaping:</strong> +0.1 bonus for trading, -0.05 penalty for holding, extra penalty for long holds</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <div className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5" />
-                  <span><strong>Continuous learning:</strong> Improves over time, epsilon decays from 30% to 5% over 1000 episodes</span>
-                </li>
-              </ul>
-            </div>
-          </div>
+          </details>
         </CardContent>
       </Card>
 
