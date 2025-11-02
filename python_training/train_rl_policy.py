@@ -377,19 +377,52 @@ class MetricsCallback(BaseCallback):
         self.client = client
         self.run_id = run_id
         self.episode_rewards = []
+        self.episode_returns = []
     
     def _on_step(self) -> bool:
+        # Collect episode rewards
+        if len(self.locals.get("rewards", [])) > 0:
+            for reward in self.locals["rewards"]:
+                self.episode_returns.append(float(reward))
         return True
     
     def _on_rollout_end(self) -> None:
-        # Log metrics to Supabase
-        mean_reward = np.mean(self.episode_rewards[-100:]) if self.episode_rewards else 0
+        # Calculate trading metrics
+        recent_returns = self.episode_returns[-500:] if len(self.episode_returns) > 500 else self.episode_returns
+        
+        if len(recent_returns) == 0:
+            return
+        
+        mean_reward = np.mean(recent_returns)
+        
+        # Win rate: % of positive returns
+        winning_trades = sum(1 for r in recent_returns if r > 0)
+        win_rate = (winning_trades / len(recent_returns)) * 100 if recent_returns else 0
+        
+        # Sharpe ratio (assuming daily returns)
+        std_reward = np.std(recent_returns) if len(recent_returns) > 1 else 1e-6
+        sharpe_ratio = (mean_reward / std_reward) * np.sqrt(252) if std_reward > 0 else 0
+        
+        # Profit factor
+        gross_profit = sum(r for r in recent_returns if r > 0)
+        gross_loss = abs(sum(r for r in recent_returns if r < 0))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+        
+        # Max drawdown
+        cumulative = np.cumsum(recent_returns)
+        running_max = np.maximum.accumulate(cumulative)
+        drawdown = running_max - cumulative
+        max_drawdown = np.max(drawdown) if len(drawdown) > 0 else 0
         
         metrics = {
             "run_id": self.run_id,
             "epoch": self.num_timesteps // 2048,
             "split": "train",
             "mean_reward": float(mean_reward),
+            "win_rate": float(win_rate),
+            "sharpe_ratio": float(sharpe_ratio),
+            "profit_factor": float(profit_factor),
+            "max_drawdown": float(max_drawdown),
             "policy_loss": float(self.model.logger.name_to_value.get("train/policy_loss", 0)),
             "value_loss": float(self.model.logger.name_to_value.get("train/value_loss", 0)),
             "entropy": float(self.model.logger.name_to_value.get("train/entropy", 0)),
@@ -397,6 +430,7 @@ class MetricsCallback(BaseCallback):
         
         try:
             self.client.table("training_metrics").insert(metrics).execute()
+            logger.info(f"Epoch {metrics['epoch']}: reward={mean_reward:.3f}, win_rate={win_rate:.1f}%, sharpe={sharpe_ratio:.2f}")
         except Exception as e:
             logger.error(f"Failed to log metrics: {e}")
 
