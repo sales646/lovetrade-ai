@@ -517,6 +517,7 @@ export type Database = {
           action_hold_pct: number | null
           action_sell_pct: number | null
           alpha_mix: number | null
+          avg_return_pct: number | null
           avg_reward: number
           avg_steps: number
           created_at: string
@@ -541,6 +542,7 @@ export type Database = {
           action_hold_pct?: number | null
           action_sell_pct?: number | null
           alpha_mix?: number | null
+          avg_return_pct?: number | null
           avg_reward: number
           avg_steps: number
           created_at?: string
@@ -565,6 +567,7 @@ export type Database = {
           action_hold_pct?: number | null
           action_sell_pct?: number | null
           alpha_mix?: number | null
+          avg_return_pct?: number | null
           avg_reward?: number
           avg_steps?: number
           created_at?: string

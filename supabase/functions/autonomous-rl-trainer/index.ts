@@ -285,6 +285,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
   let expertCorrectCounts: Record<string, { correct: number; total: number }> = {};
   let totalTrades = 0;
   let winningTrades = 0;
+  let totalReturnPct = 0;
   
   // Simulate through historical bars with REAL trade outcomes
   for (let i = 0; i < bars.length - 15; i++) { // Leave room for trade to complete
@@ -330,6 +331,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       reward = tradeResult.reward;
       totalReward += reward;
       totalTrades++;
+      totalReturnPct += tradeResult.pnl_pct;
       if (reward > 0) winningTrades++;
       
       // Get state after trade completes
@@ -364,6 +366,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       reward = tradeResult.reward;
       totalReward += reward;
       totalTrades++;
+      totalReturnPct += tradeResult.pnl_pct;
       if (reward > 0) winningTrades++;
       
       // Get state after trade completes
@@ -489,8 +492,9 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
   const lossTotal = qState.alpha_imitation * lossImitation + (1 - qState.alpha_imitation) * lossRL;
   
   const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
+  const avgReturnPct = totalTrades > 0 ? totalReturnPct / totalTrades : 0;
   
-  await log("INFO", `Episode complete: ${steps} steps, reward: ${totalReward.toFixed(2)}, Win Rate: ${winRate.toFixed(1)}%, L_RL: ${lossRL.toFixed(4)}, L_imit: ${lossImitation.toFixed(4)}, L_total: ${lossTotal.toFixed(4)}`);
+  await log("INFO", `Episode complete: ${steps} steps, reward: ${totalReward.toFixed(2)}, Win Rate: ${winRate.toFixed(1)}%, Avg Return: ${avgReturnPct.toFixed(2)}%, L_RL: ${lossRL.toFixed(4)}, L_imit: ${lossImitation.toFixed(4)}, L_total: ${lossTotal.toFixed(4)}`);
   
   return { 
     reward: totalReward, 
@@ -503,6 +507,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
     totalTrades,
     winningTrades,
     winRate,
+    totalReturnPct,
   };
 }
 
@@ -524,6 +529,7 @@ async function runTrainingLoop(iterations: number = 10) {
   const aggregateExpertAccuracies: Record<string, number[]> = {};
   let totalTrades = 0;
   let totalWinningTrades = 0;
+  let totalReturnPct = 0;
   
   for (let i = 0; i < iterations; i++) {
     // Pick random symbol for each episode
@@ -544,6 +550,7 @@ async function runTrainingLoop(iterations: number = 10) {
     // Aggregate trade outcomes
     totalTrades += result.totalTrades || 0;
     totalWinningTrades += result.winningTrades || 0;
+    totalReturnPct += result.totalReturnPct || 0;
     
     // Aggregate expert accuracies
     for (const [expertName, accuracy] of Object.entries(result.expertAccuracies)) {
@@ -598,6 +605,7 @@ async function runTrainingLoop(iterations: number = 10) {
   const avgLossImitation = totalLossImitation / iterations;
   const avgLossTotal = totalLossTotal / iterations;
   const batchWinRate = totalTrades > 0 ? (totalWinningTrades / totalTrades) * 100 : 0;
+  const avgReturnPct = totalTrades > 0 ? totalReturnPct / totalTrades : 0;
   
   const { data: metricData } = await supabase.from("rl_training_metrics").insert({
     episodes: iterations,
@@ -618,6 +626,7 @@ async function runTrainingLoop(iterations: number = 10) {
     win_rate_pct: batchWinRate,
     total_trades: totalTrades,
     winning_trades: totalWinningTrades,
+    avg_return_pct: avgReturnPct,
   }).select().single();
   
   // Log per-expert contributions
@@ -651,6 +660,7 @@ async function runTrainingLoop(iterations: number = 10) {
     qTableSize: Object.keys(qState.q_table).length,
     actionDistribution: `BUY:${actionBuyPct.toFixed(1)}% SELL:${actionSellPct.toFixed(1)}% HOLD:${actionHoldPct.toFixed(1)}%`,
     winRate: `${batchWinRate.toFixed(1)}% (${totalWinningTrades}/${totalTrades})`,
+    avgReturn: `${avgReturnPct >= 0 ? '+' : ''}${avgReturnPct.toFixed(2)}%`,
     expertAccuracies: avgExpertAccuracies,
   });
   
@@ -671,6 +681,7 @@ async function runTrainingLoop(iterations: number = 10) {
     winRate: batchWinRate,
     totalTrades,
     winningTrades: totalWinningTrades,
+    avgReturnPct,
   };
 }
 

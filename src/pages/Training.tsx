@@ -308,6 +308,21 @@ export default function Training() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Avg Return %</CardTitle>
+            <TrendingUp className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className={`text-2xl font-bold ${latestMetric?.avg_return_pct && Number(latestMetric.avg_return_pct) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+              {latestMetric?.avg_return_pct 
+                ? `${Number(latestMetric.avg_return_pct) >= 0 ? '+' : ''}${Number(latestMetric.avg_return_pct).toFixed(2)}%`
+                : "—"}
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">Per trade (net of fees)</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Avg Reward (Recent)</CardTitle>
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
