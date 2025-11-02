@@ -72,6 +72,42 @@ export default function Training() {
   const totalEpisodes = qState?.episode_count || 0;
   const epsilon = qState?.epsilon || 0;
   const qTableSize = qState?.q_table ? Object.keys(qState.q_table).length : 0;
+  
+  // Calculate weighted accuracy from expert accuracies
+  const calculateWeightedAccuracy = () => {
+    if (!latestMetric?.expert_accuracies) return 0;
+    const expertAccs = latestMetric.expert_accuracies as Record<string, number>;
+    const weights: Record<string, number> = {
+      "RSI_EMA": 0.40,
+      "VWAP_REVERSION": 0.30,
+      "TREND_PULLBACK": 0.10,
+      "VWAP_DELTA_CONFLUENCE": 0.10,
+      "AFTERNOON_FADE": 0.05,
+      "LIQUIDITY_SWEEP": 0.05
+    };
+    
+    let totalWeighted = 0;
+    let totalWeight = 0;
+    
+    Object.entries(expertAccs).forEach(([expert, accuracy]) => {
+      const weight = weights[expert] || 0;
+      totalWeighted += accuracy * weight;
+      totalWeight += weight;
+    });
+    
+    return totalWeight > 0 ? (totalWeighted / totalWeight) * 100 : 0;
+  };
+  
+  // Calculate win rate based on positive rewards
+  const calculateWinRate = () => {
+    if (!metrics || metrics.length === 0) return 0;
+    const recentMetrics = metrics.slice(0, 10);
+    const positiveRewards = recentMetrics.filter(m => Number(m.avg_reward) > 0).length;
+    return (positiveRewards / recentMetrics.length) * 100;
+  };
+  
+  const weightedAccuracy = calculateWeightedAccuracy();
+  const winRate = calculateWinRate();
 
   // Prepare chart data
   const chartData = metrics?.slice(0, 20).reverse().map((m, i) => ({
@@ -99,7 +135,7 @@ export default function Training() {
       </div>
 
       {/* Stats */}
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Total Episodes</CardTitle>
@@ -146,6 +182,30 @@ export default function Training() {
           <CardContent>
             <div className="text-2xl font-bold">{qTableSize.toLocaleString()}</div>
             <p className="text-xs text-muted-foreground">Unique states</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Accuracy Score</CardTitle>
+            <Target className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{weightedAccuracy.toFixed(1)}%</div>
+            <Progress value={weightedAccuracy} className="mt-2" />
+            <p className="text-xs text-muted-foreground mt-1">Weighted expert match</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Win Rate</CardTitle>
+            <TrendingUp className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{winRate.toFixed(1)}%</div>
+            <Progress value={winRate} className="mt-2" />
+            <p className="text-xs text-muted-foreground mt-1">Last 10 episodes</p>
           </CardContent>
         </Card>
       </div>
