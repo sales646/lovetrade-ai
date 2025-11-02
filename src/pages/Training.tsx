@@ -108,8 +108,8 @@ export default function Training() {
   }, [autoIntervalId, autoGenIntervalId]);
 
   const latestMetric = metrics?.[0];
-  const totalEpisodes = qState?.episode_count || 0;
-  const epsilon = qState?.epsilon || 0;
+  const totalEpisodes = qState?.episode_count || latestMetric?.total_episodes || 0;
+  const epsilon = qState?.epsilon || latestMetric?.epsilon || 0;
   const qTableSize = qState?.q_table ? Object.keys(qState.q_table).length : 0;
   
   // Calculate weighted accuracy from expert accuracies
