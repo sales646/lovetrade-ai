@@ -11,3 +11,6 @@ verify_jwt = false
 
 [functions.generate-trajectories]
 verify_jwt = false
+
+[functions.get-service-key]
+verify_jwt = false
