@@ -151,7 +151,7 @@ export default function Training() {
             <div>
               <h2 className="mb-2 text-3xl font-bold">Autonomous RL Trading</h2>
               <p className="text-muted-foreground">
-                Aggressive 4:1 R:R strategy with outcome-based rewards from real P&L
+                Position-sized trades using your Alpaca account balance with outcome-based rewards from real P&L
               </p>
             </div>
           </div>
@@ -210,7 +210,7 @@ export default function Training() {
               </pre>
             </div>
             
-            <div className="grid grid-cols-2 gap-3 text-xs">
+            <div className="grid grid-cols-3 gap-3 text-xs">
               <div className="rounded-lg border border-border bg-muted/30 p-3">
                 <div className="font-semibold mb-2">⚡ Realistic Settings</div>
                 <div className="space-y-1 text-muted-foreground">
@@ -220,6 +220,17 @@ export default function Training() {
                   <div>• Fees: <span className="font-mono">0.12%</span> | Slip: <span className="font-mono">0.08%</span></div>
                 </div>
               </div>
+              
+              <div className="rounded-lg border border-border bg-muted/30 p-3">
+                <div className="font-semibold mb-2">💰 Position Sizing</div>
+                <div className="space-y-1 text-muted-foreground">
+                  <div>• Risk: <span className="text-yellow-500 font-mono">1% per trade</span></div>
+                  <div>• Uses <span className="font-mono">Alpaca balance</span></div>
+                  <div>• Shares = Risk$ / StopDistance</div>
+                  <div>• Rewards scaled by <span className="font-mono">$P&L</span></div>
+                </div>
+              </div>
+
               <div className="rounded-lg border border-border bg-muted/30 p-3">
                 <div className="font-semibold mb-2">🎯 Real Outcomes</div>
                 <div className="space-y-1 text-muted-foreground">
@@ -323,14 +334,20 @@ export default function Training() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Avg Reward (Recent)</CardTitle>
+            <CardTitle className="text-sm font-medium">Avg Dollar P&L</CardTitle>
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className={`text-2xl font-bold ${avgRewardTrend >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-              {avgRewardTrend >= 0 ? '+' : ''}{avgRewardTrend.toFixed(2)}
+            <div className={`text-2xl font-bold ${latestMetric?.avg_dollar_pnl && Number(latestMetric.avg_dollar_pnl) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+              {latestMetric?.avg_dollar_pnl 
+                ? `$${Number(latestMetric.avg_dollar_pnl) >= 0 ? '+' : ''}${Number(latestMetric.avg_dollar_pnl).toFixed(2)}`
+                : "—"}
             </div>
-            <p className="text-xs text-muted-foreground mt-1">Last 20 batches</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              {latestMetric?.account_equity 
+                ? `Account: $${Number(latestMetric.account_equity).toLocaleString()}`
+                : "Per trade in dollars"}
+            </p>
           </CardContent>
         </Card>
       </div>

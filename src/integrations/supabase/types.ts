@@ -513,10 +513,12 @@ export type Database = {
       }
       rl_training_metrics: {
         Row: {
+          account_equity: number | null
           action_buy_pct: number | null
           action_hold_pct: number | null
           action_sell_pct: number | null
           alpha_mix: number | null
+          avg_dollar_pnl: number | null
           avg_return_pct: number | null
           avg_reward: number
           avg_steps: number
@@ -538,10 +540,12 @@ export type Database = {
           winning_trades: number | null
         }
         Insert: {
+          account_equity?: number | null
           action_buy_pct?: number | null
           action_hold_pct?: number | null
           action_sell_pct?: number | null
           alpha_mix?: number | null
+          avg_dollar_pnl?: number | null
           avg_return_pct?: number | null
           avg_reward: number
           avg_steps: number
@@ -563,10 +567,12 @@ export type Database = {
           winning_trades?: number | null
         }
         Update: {
+          account_equity?: number | null
           action_buy_pct?: number | null
           action_hold_pct?: number | null
           action_sell_pct?: number | null
           alpha_mix?: number | null
+          avg_dollar_pnl?: number | null
           avg_return_pct?: number | null
           avg_reward?: number
           avg_steps?: number

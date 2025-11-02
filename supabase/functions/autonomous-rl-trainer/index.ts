@@ -13,6 +13,10 @@ const corsHeaders = {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+// Account capital parameters
+let ACCOUNT_EQUITY = 100000; // Default $100k, will be updated from Alpaca
+const RISK_PER_TRADE_PCT = 1.0; // 1% risk per trade
+
 // Expert weights for imitation learning
 const EXPERT_WEIGHTS: Record<string, number> = {
   "RSI_EMA": 0.40,
@@ -52,6 +56,24 @@ async function log(level: "INFO" | "WARN" | "ERROR", message: string, metadata?:
     message,
     metadata: metadata || {},
   });
+}
+
+async function fetchAlpacaAccount(): Promise<number> {
+  try {
+    const { data, error } = await supabase.functions.invoke("fetch-alpaca-account");
+    
+    if (error || !data?.success) {
+      await log("WARN", "Failed to fetch Alpaca account, using default $100k", { error });
+      return 100000;
+    }
+    
+    const equity = data.account.equity;
+    await log("INFO", `Fetched Alpaca account equity: $${equity.toLocaleString()}`);
+    return equity;
+  } catch (error) {
+    await log("WARN", "Error fetching Alpaca account, using default $100k", { error });
+    return 100000;
+  }
 }
 
 async function loadQState(): Promise<QState> {
@@ -160,6 +182,18 @@ function selectAction(stateKey: string, qState: QState): number {
   }
 }
 
+// Calculate position size based on account equity and risk
+function calculatePositionSize(entryPrice: number, stopDistance: number): { shares: number; dollarSize: number } {
+  // Risk amount in dollars
+  const riskDollars = ACCOUNT_EQUITY * (RISK_PER_TRADE_PCT / 100);
+  
+  // Shares = Risk$ / (Entry - Stop) = Risk$ / StopDistance
+  const shares = Math.floor(riskDollars / stopDistance);
+  const dollarSize = shares * entryPrice;
+  
+  return { shares, dollarSize };
+}
+
 // Simulate a realistic trade with stops, targets, fees, and slippage
 function simulateTradeOutcome(
   bars: any[],
@@ -230,7 +264,7 @@ function simulateTradeOutcome(
     }
   }
   
-  // Calculate P&L
+  // Calculate P&L percentage
   let grossPnlPct = side === "BUY"
     ? ((exitPrice - entryPrice) / entryPrice) * 100
     : ((entryPrice - exitPrice) / entryPrice) * 100;
@@ -238,12 +272,23 @@ function simulateTradeOutcome(
   // Apply slippage and fees
   const netPnlPct = grossPnlPct - slippagePct - feesPct;
   
-  // Reward scaling: +3.5% = +1.0 reward, -1.5% = -0.5 reward
-  const reward = netPnlPct / 3.5;
+  // Calculate position size based on risk management
+  const positionData = calculatePositionSize(entryPrice, stopLossDistance);
+  
+  // Calculate dollar P&L
+  const dollarPnl = positionData.dollarSize * (netPnlPct / 100);
+  
+  // Reward scaling based on DOLLAR P&L
+  // Scale by account size: $1000 profit on $100k account = +1.0 reward
+  const rewardScaleFactor = ACCOUNT_EQUITY / 1000;
+  const reward = dollarPnl / rewardScaleFactor;
   
   return {
     reward,
     pnl_pct: netPnlPct,
+    pnl_dollars: dollarPnl,
+    position_size: positionData.dollarSize,
+    shares: positionData.shares,
     exit_reason: exitReason,
     bars_held: barsHeld,
   };
@@ -286,6 +331,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
   let totalTrades = 0;
   let winningTrades = 0;
   let totalReturnPct = 0;
+  let totalDollarPnl = 0;
   
   // Simulate through historical bars with REAL trade outcomes
   for (let i = 0; i < bars.length - 15; i++) { // Leave room for trade to complete
@@ -332,6 +378,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       totalReward += reward;
       totalTrades++;
       totalReturnPct += tradeResult.pnl_pct;
+      totalDollarPnl += tradeResult.pnl_dollars;
       if (reward > 0) winningTrades++;
       
       // Get state after trade completes
@@ -367,6 +414,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       totalReward += reward;
       totalTrades++;
       totalReturnPct += tradeResult.pnl_pct;
+      totalDollarPnl += tradeResult.pnl_dollars;
       if (reward > 0) winningTrades++;
       
       // Get state after trade completes
@@ -493,8 +541,9 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
   
   const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
   const avgReturnPct = totalTrades > 0 ? totalReturnPct / totalTrades : 0;
+  const avgDollarPnl = totalTrades > 0 ? totalDollarPnl / totalTrades : 0;
   
-  await log("INFO", `Episode complete: ${steps} steps, reward: ${totalReward.toFixed(2)}, Win Rate: ${winRate.toFixed(1)}%, Avg Return: ${avgReturnPct.toFixed(2)}%, L_RL: ${lossRL.toFixed(4)}, L_imit: ${lossImitation.toFixed(4)}, L_total: ${lossTotal.toFixed(4)}`);
+  await log("INFO", `Episode complete: ${steps} steps, reward: ${totalReward.toFixed(2)}, Win Rate: ${winRate.toFixed(1)}%, Avg Return: ${avgReturnPct.toFixed(2)}%, Avg P&L: $${avgDollarPnl.toFixed(2)}, L_RL: ${lossRL.toFixed(4)}, L_imit: ${lossImitation.toFixed(4)}, L_total: ${lossTotal.toFixed(4)}`);
   
   return { 
     reward: totalReward, 
@@ -508,6 +557,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
     winningTrades,
     winRate,
     totalReturnPct,
+    totalDollarPnl,
   };
 }
 
@@ -515,6 +565,10 @@ async function runTrainingLoop(iterations: number = 10) {
   const loopStart = new Date();
   
   await log("INFO", `🚀 Starting autonomous RL training (${iterations} episodes)`);
+  
+  // Fetch Alpaca account equity first
+  ACCOUNT_EQUITY = await fetchAlpacaAccount();
+  await log("INFO", `Using account equity: $${ACCOUNT_EQUITY.toLocaleString()} | Risk per trade: ${RISK_PER_TRADE_PCT}%`);
   
   // Load Q-state
   const qState = await loadQState();
@@ -530,6 +584,7 @@ async function runTrainingLoop(iterations: number = 10) {
   let totalTrades = 0;
   let totalWinningTrades = 0;
   let totalReturnPct = 0;
+  let totalDollarPnl = 0;
   
   for (let i = 0; i < iterations; i++) {
     // Pick random symbol for each episode
@@ -551,6 +606,7 @@ async function runTrainingLoop(iterations: number = 10) {
     totalTrades += result.totalTrades || 0;
     totalWinningTrades += result.winningTrades || 0;
     totalReturnPct += result.totalReturnPct || 0;
+    totalDollarPnl += result.totalDollarPnl || 0;
     
     // Aggregate expert accuracies
     for (const [expertName, accuracy] of Object.entries(result.expertAccuracies)) {
@@ -606,6 +662,7 @@ async function runTrainingLoop(iterations: number = 10) {
   const avgLossTotal = totalLossTotal / iterations;
   const batchWinRate = totalTrades > 0 ? (totalWinningTrades / totalTrades) * 100 : 0;
   const avgReturnPct = totalTrades > 0 ? totalReturnPct / totalTrades : 0;
+  const avgDollarPnl = totalTrades > 0 ? totalDollarPnl / totalTrades : 0;
   
   const { data: metricData } = await supabase.from("rl_training_metrics").insert({
     episodes: iterations,
@@ -627,6 +684,8 @@ async function runTrainingLoop(iterations: number = 10) {
     total_trades: totalTrades,
     winning_trades: totalWinningTrades,
     avg_return_pct: avgReturnPct,
+    avg_dollar_pnl: avgDollarPnl,
+    account_equity: ACCOUNT_EQUITY,
   }).select().single();
   
   // Log per-expert contributions
@@ -661,6 +720,8 @@ async function runTrainingLoop(iterations: number = 10) {
     actionDistribution: `BUY:${actionBuyPct.toFixed(1)}% SELL:${actionSellPct.toFixed(1)}% HOLD:${actionHoldPct.toFixed(1)}%`,
     winRate: `${batchWinRate.toFixed(1)}% (${totalWinningTrades}/${totalTrades})`,
     avgReturn: `${avgReturnPct >= 0 ? '+' : ''}${avgReturnPct.toFixed(2)}%`,
+    avgDollarPnl: `$${avgDollarPnl >= 0 ? '+' : ''}${avgDollarPnl.toFixed(2)}`,
+    accountEquity: `$${ACCOUNT_EQUITY.toLocaleString()}`,
     expertAccuracies: avgExpertAccuracies,
   });
   
@@ -682,6 +743,8 @@ async function runTrainingLoop(iterations: number = 10) {
     totalTrades,
     winningTrades: totalWinningTrades,
     avgReturnPct,
+    avgDollarPnl,
+    accountEquity: ACCOUNT_EQUITY,
   };
 }
 
