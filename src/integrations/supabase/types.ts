@@ -14,6 +14,87 @@ export type Database = {
   }
   public: {
     Tables: {
+      bot_config: {
+        Row: {
+          continuous_learning_enabled: boolean
+          id: string
+          is_active: boolean
+          loop_interval_minutes: number
+          loops_per_cycle: number
+          max_concurrent_positions: number
+          max_drawdown_pct: number
+          max_position_size_pct: number
+          risk_per_trade_pct: number
+          updated_at: string
+        }
+        Insert: {
+          continuous_learning_enabled?: boolean
+          id?: string
+          is_active?: boolean
+          loop_interval_minutes?: number
+          loops_per_cycle?: number
+          max_concurrent_positions?: number
+          max_drawdown_pct?: number
+          max_position_size_pct?: number
+          risk_per_trade_pct?: number
+          updated_at?: string
+        }
+        Update: {
+          continuous_learning_enabled?: boolean
+          id?: string
+          is_active?: boolean
+          loop_interval_minutes?: number
+          loops_per_cycle?: number
+          max_concurrent_positions?: number
+          max_drawdown_pct?: number
+          max_position_size_pct?: number
+          risk_per_trade_pct?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      bot_loops: {
+        Row: {
+          completed_at: string | null
+          error_message: string | null
+          id: string
+          loop_number: number
+          positions_closed: number
+          signals_generated: number
+          started_at: string
+          status: string
+          total_pnl: number
+          trades_placed: number
+          trades_skipped: number
+        }
+        Insert: {
+          completed_at?: string | null
+          error_message?: string | null
+          id?: string
+          loop_number: number
+          positions_closed?: number
+          signals_generated?: number
+          started_at?: string
+          status?: string
+          total_pnl?: number
+          trades_placed?: number
+          trades_skipped?: number
+        }
+        Update: {
+          completed_at?: string | null
+          error_message?: string | null
+          id?: string
+          loop_number?: number
+          positions_closed?: number
+          signals_generated?: number
+          started_at?: string
+          status?: string
+          total_pnl?: number
+          trades_placed?: number
+          trades_skipped?: number
+        }
+        Relationships: []
+      }
       expert_trajectories: {
         Row: {
           action: number
@@ -149,6 +230,83 @@ export type Database = {
         }
         Relationships: []
       }
+      online_learning: {
+        Row: {
+          created_at: string
+          id: string
+          learning_rate: number
+          loss: number | null
+          metrics: Json | null
+          model_type: string
+          samples_processed: number
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          learning_rate: number
+          loss?: number | null
+          metrics?: Json | null
+          model_type: string
+          samples_processed: number
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          learning_rate?: number
+          loss?: number | null
+          metrics?: Json | null
+          model_type?: string
+          samples_processed?: number
+        }
+        Relationships: []
+      }
+      position_sizing: {
+        Row: {
+          base_size: number
+          created_at: string
+          drawdown_adjusted_size: number
+          factors: Json
+          final_size: number
+          id: string
+          risk_amount: number
+          rl_adjusted_size: number
+          signal_id: string | null
+          volatility_adjusted_size: number
+        }
+        Insert: {
+          base_size: number
+          created_at?: string
+          drawdown_adjusted_size: number
+          factors: Json
+          final_size: number
+          id?: string
+          risk_amount: number
+          rl_adjusted_size: number
+          signal_id?: string | null
+          volatility_adjusted_size: number
+        }
+        Update: {
+          base_size?: number
+          created_at?: string
+          drawdown_adjusted_size?: number
+          factors?: Json
+          final_size?: number
+          id?: string
+          risk_amount?: number
+          rl_adjusted_size?: number
+          signal_id?: string | null
+          volatility_adjusted_size?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "position_sizing_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "trading_signals"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       positions: {
         Row: {
           current_price: number | null
@@ -231,6 +389,130 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      rl_decisions: {
+        Row: {
+          action: string
+          confidence: number
+          created_at: string
+          id: string
+          q_value: number | null
+          reasoning: string | null
+          signal_id: string | null
+          state_features: Json
+        }
+        Insert: {
+          action: string
+          confidence: number
+          created_at?: string
+          id?: string
+          q_value?: number | null
+          reasoning?: string | null
+          signal_id?: string | null
+          state_features: Json
+        }
+        Update: {
+          action?: string
+          confidence?: number
+          created_at?: string
+          id?: string
+          q_value?: number | null
+          reasoning?: string | null
+          signal_id?: string | null
+          state_features?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "rl_decisions_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "trading_signals"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      signal_correlations: {
+        Row: {
+          correlation: number
+          created_at: string
+          id: string
+          position_symbol: string
+          signal_id: string | null
+        }
+        Insert: {
+          correlation: number
+          created_at?: string
+          id?: string
+          position_symbol: string
+          signal_id?: string | null
+        }
+        Update: {
+          correlation?: number
+          created_at?: string
+          id?: string
+          position_symbol?: string
+          signal_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "signal_correlations_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "trading_signals"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      strategy_performance: {
+        Row: {
+          avg_rr_ratio: number
+          created_at: string
+          id: string
+          is_active: boolean
+          last_trade_at: string | null
+          losing_trades: number
+          max_drawdown: number
+          profit_factor: number
+          sharpe_ratio: number
+          strategy_name: string
+          total_trades: number
+          updated_at: string
+          win_rate: number
+          winning_trades: number
+        }
+        Insert: {
+          avg_rr_ratio?: number
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          last_trade_at?: string | null
+          losing_trades?: number
+          max_drawdown?: number
+          profit_factor?: number
+          sharpe_ratio?: number
+          strategy_name: string
+          total_trades?: number
+          updated_at?: string
+          win_rate?: number
+          winning_trades?: number
+        }
+        Update: {
+          avg_rr_ratio?: number
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          last_trade_at?: string | null
+          losing_trades?: number
+          max_drawdown?: number
+          profit_factor?: number
+          sharpe_ratio?: number
+          strategy_name?: string
+          total_trades?: number
+          updated_at?: string
+          win_rate?: number
+          winning_trades?: number
+        }
+        Relationships: []
       }
       symbols: {
         Row: {

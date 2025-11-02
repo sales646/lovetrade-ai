@@ -20,3 +20,18 @@ verify_jwt = false
 
 [functions.autonomous-trader]
 verify_jwt = false
+
+[functions.trading-engine]
+verify_jwt = false
+
+[functions.rl-agent]
+verify_jwt = false
+
+[functions.position-monitor]
+verify_jwt = false
+
+[functions.online-learner]
+verify_jwt = false
+
+[functions.strategy-promoter]
+verify_jwt = false

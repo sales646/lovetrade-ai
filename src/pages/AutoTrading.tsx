@@ -2,8 +2,11 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { supabase } from "@/integrations/supabase/client";
-import { Play, Pause, RefreshCw, TrendingUp, Shield, Activity } from "lucide-react";
+import { Play, Pause, RefreshCw, TrendingUp, Shield, Activity, Brain, Zap } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
 
@@ -27,10 +30,32 @@ interface Position {
   opened_at: string;
 }
 
+interface BotConfig {
+  is_active: boolean;
+  continuous_learning_enabled: boolean;
+  max_concurrent_positions: number;
+  max_position_size_pct: number;
+  risk_per_trade_pct: number;
+  max_drawdown_pct: number;
+  loop_interval_minutes: number;
+  loops_per_cycle: number;
+}
+
 export default function AutoTrading() {
   const [isRunning, setIsRunning] = useState(false);
   const [logs, setLogs] = useState<SystemLog[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
+  const [config, setConfig] = useState<BotConfig>({
+    is_active: false,
+    continuous_learning_enabled: true,
+    max_concurrent_positions: 5,
+    max_position_size_pct: 20,
+    risk_per_trade_pct: 1,
+    max_drawdown_pct: 10,
+    loop_interval_minutes: 5,
+    loops_per_cycle: 12,
+  });
+  const [numLoops, setNumLoops] = useState(1);
   const [stats, setStats] = useState({
     signals_today: 0,
     trades_executed: 0,
@@ -42,6 +67,7 @@ export default function AutoTrading() {
     fetchLogs();
     fetchPositions();
     fetchStats();
+    fetchConfig();
 
     // Real-time subscriptions
     const logsChannel = supabase
@@ -71,6 +97,18 @@ export default function AutoTrading() {
       supabase.removeChannel(positionsChannel);
     };
   }, []);
+
+  const fetchConfig = async () => {
+    const { data } = await supabase.from("bot_config").select("*").single();
+    if (data) setConfig(data as BotConfig);
+  };
+
+  const updateConfig = async (updates: Partial<BotConfig>) => {
+    const newConfig = { ...config, ...updates };
+    setConfig(newConfig);
+    await supabase.from("bot_config").update(updates).eq("id", (await supabase.from("bot_config").select("id").single()).data?.id);
+    toast.success("Configuration updated");
+  };
 
   const fetchLogs = async () => {
     const { data } = await supabase
@@ -120,15 +158,18 @@ export default function AutoTrading() {
 
   const handleRunTrader = async () => {
     setIsRunning(true);
-    toast.info("Running autonomous trader...");
+    toast.info(`Running ${numLoops} trading loops...`);
 
     try {
-      const { data, error } = await supabase.functions.invoke("autonomous-trader");
+      const { data, error } = await supabase.functions.invoke("autonomous-trader", {
+        body: { loops: numLoops },
+      });
 
       if (error) throw error;
 
-      toast.success(`Trader completed: ${data.signals_processed} signals processed`);
+      toast.success(`Completed ${numLoops} loops successfully`);
       fetchStats();
+      fetchPositions();
     } catch (error) {
       toast.error("Trader failed: " + (error as Error).message);
     } finally {
@@ -156,33 +197,110 @@ export default function AutoTrading() {
             <div>
               <CardTitle>Autonomous Trading System</CardTitle>
               <CardDescription>
-                AI-driven trading med automatisk riskbedömning
+                Multi-strategy ensemble + RL-driven decisions + continuous learning
               </CardDescription>
             </div>
-            <Badge variant={isRunning ? "default" : "secondary"} className="text-sm">
-              {isRunning ? "🟢 Running" : "⚪ Idle"}
-            </Badge>
+            <div className="flex items-center gap-2">
+              <Badge variant={config.continuous_learning_enabled ? "default" : "secondary"}>
+                {config.continuous_learning_enabled ? "🧠 Learning" : "⏸️ Paused"}
+              </Badge>
+              <Badge variant={isRunning ? "default" : "secondary"} className="text-sm">
+                {isRunning ? "🟢 Running" : "⚪ Idle"}
+              </Badge>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
-          <div className="flex gap-4">
-            <Button onClick={handleRunTrader} disabled={isRunning}>
-              {isRunning ? (
-                <>
-                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  Running...
-                </>
-              ) : (
-                <>
-                  <Play className="mr-2 h-4 w-4" />
-                  Run Trader
-                </>
-              )}
-            </Button>
-            <Button variant="outline" onClick={fetchStats}>
-              <RefreshCw className="mr-2 h-4 w-4" />
-              Refresh Stats
-            </Button>
+          <div className="space-y-6">
+            {/* Quick Actions */}
+            <div className="flex gap-4">
+              <div className="flex-1">
+                <Label htmlFor="numLoops">Number of Loops</Label>
+                <Input
+                  id="numLoops"
+                  type="number"
+                  min="1"
+                  max="50"
+                  value={numLoops}
+                  onChange={(e) => setNumLoops(parseInt(e.target.value))}
+                  disabled={isRunning}
+                />
+              </div>
+              <div className="flex items-end gap-2">
+                <Button onClick={handleRunTrader} disabled={isRunning}>
+                  {isRunning ? (
+                    <>
+                      <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                      Running...
+                    </>
+                  ) : (
+                    <>
+                      <Play className="mr-2 h-4 w-4" />
+                      Run Trader
+                    </>
+                  )}
+                </Button>
+                <Button variant="outline" onClick={fetchStats} disabled={isRunning}>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Refresh
+                </Button>
+              </div>
+            </div>
+
+            {/* Configuration */}
+            <div className="border-t pt-4">
+              <h3 className="text-sm font-medium mb-4">Configuration</h3>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="learning">Continuous Learning</Label>
+                  <Switch
+                    id="learning"
+                    checked={config.continuous_learning_enabled}
+                    onCheckedChange={(checked) =>
+                      updateConfig({ continuous_learning_enabled: checked })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="maxPos">Max Concurrent Positions</Label>
+                  <Input
+                    id="maxPos"
+                    type="number"
+                    value={config.max_concurrent_positions}
+                    onChange={(e) =>
+                      updateConfig({ max_concurrent_positions: parseInt(e.target.value) })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="riskPer">Risk per Trade (%)</Label>
+                  <Input
+                    id="riskPer"
+                    type="number"
+                    step="0.1"
+                    value={config.risk_per_trade_pct}
+                    onChange={(e) =>
+                      updateConfig({ risk_per_trade_pct: parseFloat(e.target.value) })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="maxDD">Max Drawdown (%)</Label>
+                  <Input
+                    id="maxDD"
+                    type="number"
+                    step="0.1"
+                    value={config.max_drawdown_pct}
+                    onChange={(e) =>
+                      updateConfig({ max_drawdown_pct: parseFloat(e.target.value) })
+                    }
+                  />
+                </div>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>
