@@ -1,10 +1,40 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { Bar } from "@/lib/types";
+import { Bar, BarSchema } from "@/lib/types";
 import { toast } from "sonner";
+import { z } from "zod";
+import type { DataSource } from "@/components/Guard/Value";
 
 /**
- * Hook to fetch historical bars from database
+ * API Response wrapper with source tracking
+ */
+export interface DataWithSource<T> {
+  data: T | null;
+  source: DataSource;
+  error?: string;
+}
+
+/**
+ * Validate database bar data with Zod
+ */
+function validateBar(row: any): Bar | null {
+  try {
+    return BarSchema.parse({
+      timestamp: new Date(row.timestamp),
+      open: Number(row.open),
+      high: Number(row.high),
+      low: Number(row.low),
+      close: Number(row.close),
+      volume: Number(row.volume),
+    });
+  } catch (error) {
+    console.error("Bar validation failed:", error);
+    return null;
+  }
+}
+
+/**
+ * Hook to fetch historical bars from database with validation
  */
 export function useHistoricalBars(
   symbol: string | null,
@@ -13,8 +43,10 @@ export function useHistoricalBars(
 ) {
   return useQuery({
     queryKey: ["historical-bars", symbol, timeframe, limit],
-    queryFn: async () => {
-      if (!symbol) return null;
+    queryFn: async (): Promise<DataWithSource<Bar[]>> => {
+      if (!symbol) {
+        return { data: null, source: "none" };
+      }
 
       const { data, error } = await supabase
         .from("historical_bars")
@@ -26,21 +58,34 @@ export function useHistoricalBars(
 
       if (error) {
         console.error("Error fetching historical bars:", error);
-        toast.error("Failed to fetch historical data");
-        return null;
+        toast.error("Failed to fetch historical data", {
+          description: error.message
+        });
+        return { data: null, source: "none", error: error.message };
       }
 
-      // Transform to Bar format and reverse to ascending order
-      return data
-        .map((row) => ({
-          timestamp: new Date(row.timestamp),
-          open: Number(row.open),
-          high: Number(row.high),
-          low: Number(row.low),
-          close: Number(row.close),
-          volume: Number(row.volume),
-        }))
-        .reverse() as Bar[];
+      if (!data || data.length === 0) {
+        return { data: [], source: "store" };
+      }
+
+      // Validate and transform bars - filter out invalid entries
+      const validatedBars = data
+        .map(validateBar)
+        .filter((bar): bar is Bar => bar !== null)
+        .reverse(); // Reverse to ascending order
+
+      if (validatedBars.length === 0) {
+        toast.error("All historical data failed validation");
+        return { data: null, source: "none", error: "Validation failed" };
+      }
+
+      // Show warning if some bars were filtered out
+      if (validatedBars.length < data.length) {
+        const filtered = data.length - validatedBars.length;
+        console.warn(`Filtered out ${filtered} invalid bars for ${symbol}`);
+      }
+
+      return { data: validatedBars, source: "store" };
     },
     enabled: !!symbol,
     staleTime: 5 * 60 * 1000, // 5 minutes

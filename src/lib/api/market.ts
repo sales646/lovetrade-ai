@@ -1,14 +1,34 @@
 import { useQuery } from "@tanstack/react-query";
 import { Quote, Bar, QuoteSchema, BarSchema } from "@/lib/types";
 import { useSettingsStore } from "@/store/settingsStore";
-import { useHistoricalBars } from "./historical";
+import { useHistoricalBars, type DataWithSource } from "./historical";
 import { toast } from "sonner";
 
 /**
- * Mock data generator with validation
- * Returns null on validation failure (UI will show "—")
+ * Validate and parse data with Zod, showing toast on error
  */
-function generateMockQuote(symbol: string): Quote | null {
+function validateData<T>(
+  schema: any,
+  data: any,
+  dataType: string
+): DataWithSource<T> {
+  try {
+    const validated = schema.parse(data);
+    return { data: validated, source: "api" };
+  } catch (error) {
+    console.error(`${dataType} validation failed:`, error);
+    toast.error(`Invalid ${dataType} data received`, {
+      description: "Data integrity check failed"
+    });
+    return { data: null, source: "none", error: String(error) };
+  }
+}
+
+/**
+ * Mock data generator with validation
+ * Returns DataWithSource - never fabricates invalid data
+ */
+function generateMockQuote(symbol: string): DataWithSource<Quote> {
   try {
     const basePrice = 100 + Math.random() * 400;
     const change = (Math.random() - 0.5) * 20;
@@ -22,15 +42,17 @@ function generateMockQuote(symbol: string): Quote | null {
       timestamp: new Date(),
     });
     
-    return quote;
+    return { data: quote, source: "mock" };
   } catch (error) {
     console.error("Failed to generate valid mock quote:", error);
-    toast.error("Data validation failed");
-    return null;
+    toast.error("Mock data generation failed", {
+      description: "Unable to create valid test data"
+    });
+    return { data: null, source: "none", error: String(error) };
   }
 }
 
-function generateMockBars(symbol: string, limit: number): Bar[] | null {
+function generateMockBars(symbol: string, limit: number): DataWithSource<Bar[]> {
   try {
     const bars: Bar[] = [];
     const now = Date.now();
@@ -57,24 +79,26 @@ function generateMockBars(symbol: string, limit: number): Bar[] | null {
       price = close;
     }
 
-    return bars;
+    return { data: bars, source: "mock" };
   } catch (error) {
     console.error("Failed to generate valid mock bars:", error);
-    toast.error("Data validation failed");
-    return null;
+    toast.error("Mock bars generation failed");
+    return { data: null, source: "none", error: String(error) };
   }
 }
 
 /**
- * Hook to fetch latest quote with validation
+ * Hook to fetch latest quote with validation and source tracking
  */
 export function useLatestQuote(symbol: string | null) {
   const { dataMode } = useSettingsStore();
 
   return useQuery({
     queryKey: ["quote", symbol, dataMode],
-    queryFn: async () => {
-      if (!symbol) return null;
+    queryFn: async (): Promise<DataWithSource<Quote>> => {
+      if (!symbol) {
+        return { data: null, source: "none" };
+      }
 
       // In mock mode, generate fake data
       if (dataMode === "mock") {
@@ -83,7 +107,13 @@ export function useLatestQuote(symbol: string | null) {
       }
 
       // TODO: Implement real API calls when not in mock mode
-      throw new Error("Live/Polling mode not yet implemented");
+      // Example:
+      // const response = await fetch(`/api/quote/${symbol}`);
+      // const json = await response.json();
+      // return validateData(QuoteSchema, json, "quote");
+      
+      toast.error("Live/Polling mode not yet implemented");
+      return { data: null, source: "none", error: "Not implemented" };
     },
     enabled: !!symbol,
     refetchInterval: dataMode === "polling" ? 5000 : false,
@@ -93,7 +123,7 @@ export function useLatestQuote(symbol: string | null) {
 
 /**
  * Hook to fetch historical bars with validation
- * Now uses real database data when available, falls back to mock
+ * Uses real database data when available, falls back to mock
  */
 export function useBars(
   symbol: string | null,
@@ -101,16 +131,19 @@ export function useBars(
   limit: number = 100
 ) {
   const { dataMode } = useSettingsStore();
-  const { data: historicalData, isLoading: historicalLoading } = useHistoricalBars(symbol, timeframe, limit);
+  const { data: historicalResult, isLoading: historicalLoading } = useHistoricalBars(symbol, timeframe, limit);
 
   return useQuery({
     queryKey: ["bars", symbol, timeframe, limit, dataMode],
-    queryFn: async () => {
-      if (!symbol) return null;
+    queryFn: async (): Promise<DataWithSource<Bar[]>> => {
+      if (!symbol) {
+        return { data: null, source: "none" };
+      }
 
-      // If we have historical data from database, use it
-      if (historicalData && historicalData.length > 0) {
-        return historicalData;
+      // If we have historical data from database, use it (validated by Supabase types)
+      const historicalBars = historicalResult?.data;
+      if (historicalBars && historicalBars.length > 0) {
+        return { data: historicalBars, source: historicalResult.source };
       }
 
       // Otherwise, use mock mode
@@ -120,7 +153,8 @@ export function useBars(
       }
 
       // TODO: Implement real API calls for live mode
-      throw new Error("Live/Polling mode not yet implemented");
+      toast.error("Live/Polling mode not yet implemented");
+      return { data: null, source: "none", error: "Not implemented" };
     },
     enabled: !!symbol && !historicalLoading,
     staleTime: 30000, // 30 seconds

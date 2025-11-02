@@ -19,8 +19,11 @@ interface WatchlistRowProps {
 }
 
 function WatchlistRow({ symbol, onSelect, onRemove }: WatchlistRowProps) {
-  const { data: quote, isLoading } = useLatestQuote(symbol);
-  const { dataMode } = useSettingsStore();
+  const { data: quoteResult, isLoading } = useLatestQuote(symbol);
+  
+  // Extract data and source from DataWithSource wrapper
+  const quote = quoteResult?.data ?? null;
+  const source = quoteResult?.source ?? "none";
 
   if (isLoading) {
     return (
@@ -41,7 +44,6 @@ function WatchlistRow({ symbol, onSelect, onRemove }: WatchlistRowProps) {
     );
   }
 
-  const source = dataMode === "mock" ? "mock" : "api";
   const isPositive = quote && quote.changePercent >= 0;
 
   return (

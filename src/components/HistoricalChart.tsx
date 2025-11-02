@@ -14,7 +14,11 @@ interface HistoricalChartProps {
 }
 
 export function HistoricalChart({ symbol, timeframe = "1d", limit = 100 }: HistoricalChartProps) {
-  const { data: bars, isLoading } = useHistoricalBars(symbol, timeframe, limit);
+  const { data: barsResult, isLoading } = useHistoricalBars(symbol, timeframe, limit);
+  
+  // Extract data and source
+  const bars = barsResult?.data ?? null;
+  const source = barsResult?.source ?? "none";
 
   const chartData = useMemo(() => {
     if (!bars || bars.length === 0) return [];
@@ -86,8 +90,15 @@ export function HistoricalChart({ symbol, timeframe = "1d", limit = 100 }: Histo
               <Badge variant="outline" className="text-xs">
                 {bars.length} bars
               </Badge>
+              {source === "mock" && (
+                <Badge variant="secondary" className="text-xs">
+                  Mock
+                </Badge>
+              )}
             </CardTitle>
-            <CardDescription>Historical price data from Yahoo Finance</CardDescription>
+            <CardDescription>
+              Historical price data from {source === "store" ? "database" : "Yahoo Finance"}
+            </CardDescription>
           </div>
           {stats && (
             <div className="text-right">
