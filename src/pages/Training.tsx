@@ -112,29 +112,12 @@ export default function Training() {
   const epsilon = qState?.epsilon || latestMetric?.epsilon || 0;
   const qTableSize = qState?.q_table ? Object.keys(qState.q_table).length : 0;
   
-  // Calculate weighted expert imitation accuracy
-  const calculateExpertMatchRate = () => {
-    if (!latestMetric?.expert_accuracies) return 0;
-    const expertAccs = latestMetric.expert_accuracies as Record<string, number>;
-    const weights: Record<string, number> = {
-      "RSI_EMA": 0.40,
-      "VWAP_REVERSION": 0.30,
-      "TREND_PULLBACK": 0.10,
-      "VWAP_DELTA_CONFLUENCE": 0.10,
-      "AFTERNOON_FADE": 0.05,
-      "LIQUIDITY_SWEEP": 0.05
-    };
-    
-    let totalWeighted = 0;
-    let totalWeight = 0;
-    
-    Object.entries(expertAccs).forEach(([expert, accuracy]) => {
-      const weight = weights[expert] || 0;
-      totalWeighted += accuracy * weight;
-      totalWeight += weight;
-    });
-    
-    return totalWeight > 0 ? (totalWeighted / totalWeight) * 100 : 0;
+  // Calculate actual trading performance (% of profitable batches)
+  const calculatePerformanceScore = () => {
+    if (!metrics || metrics.length === 0) return 0;
+    const recent = metrics.slice(0, Math.min(20, metrics.length));
+    const profitableBatches = recent.filter(m => Number(m.avg_reward) > 0).length;
+    return (profitableBatches / recent.length) * 100;
   };
   
   // Calculate average reward trend (last 20 batches)
@@ -145,7 +128,7 @@ export default function Training() {
     return avgRecent;
   };
   
-  const expertMatchRate = calculateExpertMatchRate();
+  const performanceScore = calculatePerformanceScore();
   const avgRewardTrend = calculateAvgRewardTrend();
 
   // Prepare chart data
@@ -304,13 +287,13 @@ export default function Training() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Expert Match</CardTitle>
+            <CardTitle className="text-sm font-medium">Profitable Batches</CardTitle>
             <Target className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{expertMatchRate.toFixed(1)}%</div>
-            <Progress value={expertMatchRate} className="mt-2" />
-            <p className="text-xs text-muted-foreground mt-1">Imitation accuracy</p>
+            <div className="text-2xl font-bold">{performanceScore.toFixed(1)}%</div>
+            <Progress value={performanceScore} className="mt-2" />
+            <p className="text-xs text-muted-foreground mt-1">Last 20 batches positive reward</p>
           </CardContent>
         </Card>
 
