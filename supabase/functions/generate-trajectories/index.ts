@@ -420,10 +420,48 @@ serve(async (req) => {
     const fees_per_trade = 1.0; // $1 per trade
     const slippage_bps = 5; // 5 basis points
 
+    // Frame stacking config
+    const FRAME_STACK_SIZE = 32;
+    
+    // Detect regime for each bar
+    const detectRegime = (features: any, prevBars: any[]): string => {
+      if (prevBars.length < 20) return "unknown";
+      
+      const { ema_20, ema_50, atr_14, close } = features;
+      const vol_recent = prevBars.slice(-10).reduce((sum, b) => sum + (b.atr_14 || 0), 0) / 10;
+      const vol_older = prevBars.slice(-20, -10).reduce((sum, b) => sum + (b.atr_14 || 0), 0) / 10;
+      
+      // High volatility regime
+      if (vol_recent > vol_older * 1.5) return "high_vol";
+      
+      // Trending regime
+      if (ema_20 && ema_50) {
+        const trend_strength = Math.abs((ema_20 - ema_50) / ema_50) * 100;
+        if (trend_strength > 2) return "trend";
+      }
+      
+      // Sideways regime
+      return "sideways";
+    };
+
+    // Calculate drawdown penalty for risk adjustment
+    const calculateDrawdown = (prevBars: any[], currentEquity: number): number => {
+      if (prevBars.length < 5) return 0;
+      const recentPrices = prevBars.slice(-20).map(b => b.close);
+      const peak = Math.max(...recentPrices);
+      const drawdown = ((peak - currentEquity) / peak) * 100;
+      return Math.max(0, drawdown);
+    };
+
     // Generate trajectories for each timestamp
-    for (let i = 0; i < indicators.length; i++) {
+    const lambda_risk = 0.2; // Risk penalty coefficient
+    
+    for (let i = FRAME_STACK_SIZE; i < indicators.length; i++) {
       const features = indicators[i];
       const timestamp = new Date(features.timestamp);
+      
+      // Get frame stack (last 32 bars including current)
+      const frameStack = indicators.slice(i - FRAME_STACK_SIZE, i + 1);
       
       // Get relevant news (within 2 hours before this timestamp)
       const relevantNews = newsData?.filter(n => {
@@ -433,43 +471,130 @@ serve(async (req) => {
       }) || [];
 
       // Get previous features for strategies that need history
-      const previousFeatures = i > 0 ? indicators.slice(Math.max(0, i - 10), i) : [];
+      const previousFeatures = indicators.slice(Math.max(0, i - 10), i);
+      
+      // Detect regime
+      const regime = detectRegime(features, previousFeatures);
+
+      // Build observation with frame stack
+      const obs_features = {
+        current: {
+          ...features,
+          news_sentiment: relevantNews[0]?.sentiment || 0,
+          news_surprise: relevantNews[0]?.surprise_score || 0,
+          news_relevance: relevantNews[0]?.relevance_score || 0,
+          news_freshness: relevantNews[0]?.freshness_minutes || 999,
+          time_sin: Math.sin(2 * Math.PI * new Date(features.timestamp).getHours() / 24),
+          time_cos: Math.cos(2 * Math.PI * new Date(features.timestamp).getHours() / 24),
+        },
+        frame_stack: frameStack.map(f => ({
+          close: f.close,
+          volume: f.volume,
+          rsi_14: f.rsi_14,
+          atr_14: f.atr_14,
+          vwap_distance_pct: f.vwap_distance_pct,
+          volume_zscore: f.volume_zscore,
+        })),
+      };
 
       // Run all strategies
+      const strategySignals: Array<{strategy: string; action: number; quality: number; reason: string}> = [];
+      
       for (const strategy of STRATEGIES) {
         const result = strategy.evaluate(features, relevantNews, previousFeatures);
         
         if (result.action !== 0 && result.entry_quality > 0.3) {
-          // Calculate reward (simplified - would need actual exit logic)
+          strategySignals.push({
+            strategy: strategy.name,
+            action: result.action,
+            quality: result.entry_quality,
+            reason: result.reason,
+          });
+        }
+      }
+
+      // Generate trajectories for signals AND counterfactual HOLDs
+      if (strategySignals.length > 0) {
+        // Process signals
+        for (const signal of strategySignals) {
           const close = Number(features.close);
           const atr = Number(features.atr_14);
           const target_r = 1.5; // 1.5R target
           
-          // Simulate trade outcome based on ATR
-          const delta_equity = result.action * atr * target_r;
+          // Simulate trade outcome based on next K bars (simplified: use ATR)
+          const delta_equity = signal.action * atr * target_r;
           const slippage = close * (slippage_bps / 10000);
-          const reward = delta_equity - fees_per_trade - slippage;
+          
+          // Calculate drawdown penalty
+          const drawdown = calculateDrawdown(previousFeatures, close);
+          const drawdown_penalty = lambda_risk * drawdown;
+          
+          // Final reward with risk adjustment
+          const reward = delta_equity - fees_per_trade - slippage - drawdown_penalty;
+          
+          // Get next observation (if available)
+          const next_obs = i + 1 < indicators.length ? {
+            ...indicators[i + 1],
+            news_sentiment: relevantNews[0]?.sentiment || 0,
+            news_surprise: relevantNews[0]?.surprise_score || 0,
+            news_relevance: relevantNews[0]?.relevance_score || 0,
+            news_freshness: relevantNews[0]?.freshness_minutes || 999,
+          } : null;
 
           trajectories.push({
             symbol,
             timeframe,
-            tactic_id: strategy.name,
+            tactic_id: signal.strategy,
             timestamp: features.timestamp,
-            obs_features: {
-              ...features,
-              news_sentiment: relevantNews[0]?.sentiment || 0,
-              news_surprise: relevantNews[0]?.surprise_score || 0,
-              news_relevance: relevantNews[0]?.relevance_score || 0,
-              news_freshness: relevantNews[0]?.freshness_minutes || 999,
-            },
-            action: result.action,
+            obs_features,
+            action: signal.action,
             reward,
             delta_equity,
             fees: fees_per_trade,
             slippage,
-            entry_quality: result.entry_quality,
+            entry_quality: signal.quality,
             rr_ratio: target_r,
-            regime_tag: "unknown", // Would need regime detection
+            regime_tag: regime,
+          });
+        }
+      } else {
+        // Counterfactual HOLD: Check if holding was a good decision
+        // Look ahead 5 bars to see if any significant move occurred
+        const lookAhead = 5;
+        if (i + lookAhead < indicators.length) {
+          const futurePrices = indicators.slice(i + 1, i + 1 + lookAhead).map(b => b.close);
+          const currentPrice = Number(features.close);
+          const atr = Number(features.atr_14);
+          
+          const maxMove = Math.max(...futurePrices.map(p => Math.abs(p - currentPrice) / atr));
+          
+          // Good skip: no significant move (< 1R)
+          // Missed winner: significant move (> 1.5R)
+          const isGoodSkip = maxMove < 1.0;
+          const isMissedWinner = maxMove > 1.5;
+          
+          // Small shaping reward for good skips, small penalty for missed winners
+          let hold_reward = 0;
+          if (isGoodSkip) {
+            hold_reward = 0.1 * atr; // Small positive for avoiding bad trade
+          } else if (isMissedWinner) {
+            hold_reward = -0.05 * atr; // Small penalty (much less than actual loss)
+          }
+          
+          trajectories.push({
+            symbol,
+            timeframe,
+            tactic_id: "HOLD",
+            timestamp: features.timestamp,
+            obs_features,
+            action: 0,
+            reward: hold_reward,
+            delta_equity: 0,
+            fees: 0,
+            slippage: 0,
+            entry_quality: isGoodSkip ? 0.8 : (isMissedWinner ? 0.2 : 0.5),
+            rr_ratio: 0,
+            regime_tag: regime,
           });
         }
       }
