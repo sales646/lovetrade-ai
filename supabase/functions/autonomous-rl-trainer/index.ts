@@ -335,6 +335,46 @@ function simulateTradeOutcome(
   };
 }
 
+// Helper function to get expert recommendation for a state
+function getExpertRecommendation(
+  stateKey: string,
+  expertTrajectories: ExpertTrajectory[]
+): { shouldTrade: boolean; confidence: number } {
+  // Find expert trajectories matching this state
+  const matchingExperts = expertTrajectories.filter(traj => {
+    const expertStateKey = getStateKey(traj.obs_features.current || {});
+    return expertStateKey === stateKey;
+  });
+  
+  if (matchingExperts.length === 0) {
+    return { shouldTrade: false, confidence: 0 };
+  }
+  
+  // Count expert actions weighted by their strategy importance
+  let tradeWeight = 0;
+  let holdWeight = 0;
+  
+  for (const traj of matchingExperts) {
+    const weight = EXPERT_WEIGHTS[traj.tactic_id] || 0;
+    if (traj.action === 0) { // hold
+      holdWeight += weight;
+    } else { // buy or sell
+      tradeWeight += weight;
+    }
+  }
+  
+  const totalWeight = tradeWeight + holdWeight;
+  if (totalWeight === 0) {
+    return { shouldTrade: false, confidence: 0 };
+  }
+  
+  const tradeConfidence = tradeWeight / totalWeight;
+  return {
+    shouldTrade: tradeConfidence > 0.6, // If >60% of experts would trade
+    confidence: Math.abs(tradeConfidence - 0.5) * 2 // 0 to 1 scale
+  };
+}
+
 async function runSimulationEpisode(qState: QState, symbol: string) {
   await log("INFO", `🎮 Running simulation episode for ${symbol}...`);
   
@@ -486,9 +526,24 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       
     } else {
       actionCounts.hold++;
-      // HOLD: significant penalty to discourage inaction
-      // Opportunity cost + time decay
-      reward = -0.15; // Increased from -0.05 to make holding more costly
+      // HOLD: Context-based reward using expert recommendations
+      
+      // Check what experts would do in this state
+      const expertRec = getExpertRecommendation(stateKey, expertTrajectories);
+      
+      if (expertRec.confidence < 0.3) {
+        // No clear expert signal - neutral
+        reward = 0.0;
+      } else if (expertRec.shouldTrade) {
+        // Experts say we should trade but we held - missed opportunity
+        // Scale penalty by expert confidence
+        reward = -0.10 * expertRec.confidence; // Up to -0.10
+      } else {
+        // Experts also say hold - correct decision to stay out
+        // Small positive reward for good patience
+        reward = 0.05 * expertRec.confidence; // Up to +0.05
+      }
+      
       totalReward += reward;
       
       if (i + 1 < bars.length) {

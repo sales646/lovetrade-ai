@@ -302,7 +302,8 @@ export default function Training() {
                   <div>• Backtested through actual bars</div>
                   <div>• Stop/target checked each bar</div>
                   <div>• Real P&L → Reward mapping</div>
-                  <div>• No fake "setup quality" scores</div>
+                  <div>• Smart hold: +reward if experts agree</div>
+                  <div>• Penalty if missed expert opportunities</div>
                 </div>
               </div>
             </div>
