@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Brain, Zap, TrendingUp, Activity, Cpu, Target, Play, Pause, Database, RefreshCw } from "lucide-react";
-import { useStartAutonomousTraining, useRLMetrics, useQState } from "@/lib/api/autonomous-training";
+import { useStartAutonomousTraining, useRLMetrics, useQState, useGPUTrainingRuns, useGPUTrainingMetrics } from "@/lib/api/autonomous-training";
 import { useAlpacaAccount } from "@/lib/api/alpaca";
 import { useGenerateTrainingData } from "@/lib/api/data-generation";
 import { useLocalGPUTrainingStatus } from "@/lib/api/training";
@@ -30,6 +30,8 @@ export default function Training() {
   const { data: qState } = useQState();
   const { data: alpacaAccount, isLoading: alpacaLoading, error: alpacaError } = useAlpacaAccount();
   const { data: localGPUStatus } = useLocalGPUTrainingStatus();
+  const { data: gpuRuns } = useGPUTrainingRuns();
+  const { data: gpuMetrics } = useGPUTrainingMetrics();
 
   // Check system status on mount
   useEffect(() => {
@@ -492,6 +494,75 @@ export default function Training() {
           </CardContent>
         </Card>
       </div>
+
+      {/* GPU Training Runs */}
+      {gpuRuns && gpuRuns.length > 0 && (
+        <Card className="border-purple-500/30 bg-purple-500/5">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Cpu className="h-5 w-5 text-purple-500" />
+              GPU Training Runs
+            </CardTitle>
+            <CardDescription>
+              Active and recent training runs from external GPU workers
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              {gpuRuns.map((run) => {
+                const runMetrics = gpuMetrics?.filter(m => m.run_id === run.id) || [];
+                const latestMetric = runMetrics[0];
+                
+                return (
+                  <div key={run.id} className="rounded-lg border border-border bg-card p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <Badge variant={run.status === 'running' ? 'default' : run.status === 'completed' ? 'secondary' : 'destructive'}>
+                          {run.status}
+                        </Badge>
+                        <span className="font-mono text-sm">{run.run_name}</span>
+                      </div>
+                      <span className="text-xs text-muted-foreground">
+                        {run.phase}
+                      </span>
+                    </div>
+                    
+                    {latestMetric && (
+                      <div className="grid grid-cols-4 gap-4 mt-3 text-sm">
+                        <div>
+                          <div className="text-muted-foreground text-xs">Epoch</div>
+                          <div className="font-bold">{latestMetric.epoch}/{run.total_epochs || '?'}</div>
+                        </div>
+                        <div>
+                          <div className="text-muted-foreground text-xs">Mean Reward</div>
+                          <div className={`font-bold ${Number(latestMetric.mean_reward) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                            {Number(latestMetric.mean_reward).toFixed(3)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-muted-foreground text-xs">Win Rate</div>
+                          <div className="font-bold">{latestMetric.win_rate ? `${Number(latestMetric.win_rate).toFixed(1)}%` : '—'}</div>
+                        </div>
+                        <div>
+                          <div className="text-muted-foreground text-xs">Sharpe</div>
+                          <div className="font-bold">{latestMetric.sharpe_ratio ? Number(latestMetric.sharpe_ratio).toFixed(2) : '—'}</div>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {run.status === 'running' && latestMetric && run.total_epochs && (
+                      <Progress 
+                        value={(latestMetric.epoch / run.total_epochs) * 100} 
+                        className="mt-3" 
+                      />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Data Generation */}
       <Card>

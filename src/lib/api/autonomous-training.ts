@@ -57,3 +57,37 @@ export function useQState() {
     refetchInterval: 5000, // Refetch every 5s
   });
 }
+
+export function useGPUTrainingRuns() {
+  return useQuery({
+    queryKey: ["gpu-training-runs"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("training_runs")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(10);
+
+      if (error) throw error;
+      return data;
+    },
+    refetchInterval: 5000, // Refetch every 5s
+  });
+}
+
+export function useGPUTrainingMetrics() {
+  return useQuery({
+    queryKey: ["gpu-training-metrics"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("training_metrics")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(100);
+
+      if (error) throw error;
+      return data;
+    },
+    refetchInterval: 5000, // Refetch every 5s
+  });
+}
