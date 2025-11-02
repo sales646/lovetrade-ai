@@ -2,3 +2,12 @@ project_id = "rgpgssvakgutmgejazjq"
 
 [functions.fetch-market-data]
 verify_jwt = false
+
+[functions.compute-indicators]
+verify_jwt = false
+
+[functions.analyze-news]
+verify_jwt = false
+
+[functions.generate-trajectories]
+verify_jwt = false

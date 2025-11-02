@@ -14,6 +14,60 @@ export type Database = {
   }
   public: {
     Tables: {
+      expert_trajectories: {
+        Row: {
+          action: number
+          created_at: string
+          delta_equity: number
+          entry_quality: number | null
+          fees: number
+          id: string
+          obs_features: Json
+          regime_tag: string | null
+          reward: number
+          rr_ratio: number | null
+          slippage: number
+          symbol: string
+          tactic_id: string
+          timeframe: string
+          timestamp: string
+        }
+        Insert: {
+          action: number
+          created_at?: string
+          delta_equity: number
+          entry_quality?: number | null
+          fees: number
+          id?: string
+          obs_features: Json
+          regime_tag?: string | null
+          reward: number
+          rr_ratio?: number | null
+          slippage: number
+          symbol: string
+          tactic_id: string
+          timeframe: string
+          timestamp: string
+        }
+        Update: {
+          action?: number
+          created_at?: string
+          delta_equity?: number
+          entry_quality?: number | null
+          fees?: number
+          id?: string
+          obs_features?: Json
+          regime_tag?: string | null
+          reward?: number
+          rr_ratio?: number | null
+          slippage?: number
+          symbol?: string
+          tactic_id?: string
+          timeframe?: string
+          timestamp?: string
+        }
+        Relationships: []
+      }
       historical_bars: {
         Row: {
           close: number
@@ -53,6 +107,48 @@ export type Database = {
         }
         Relationships: []
       }
+      news_features: {
+        Row: {
+          article_snippet: string | null
+          created_at: string
+          freshness_minutes: number | null
+          headline: string
+          id: string
+          relevance_score: number | null
+          sentiment: number | null
+          source: string | null
+          surprise_score: number | null
+          symbol: string
+          timestamp: string
+        }
+        Insert: {
+          article_snippet?: string | null
+          created_at?: string
+          freshness_minutes?: number | null
+          headline: string
+          id?: string
+          relevance_score?: number | null
+          sentiment?: number | null
+          source?: string | null
+          surprise_score?: number | null
+          symbol: string
+          timestamp: string
+        }
+        Update: {
+          article_snippet?: string | null
+          created_at?: string
+          freshness_minutes?: number | null
+          headline?: string
+          id?: string
+          relevance_score?: number | null
+          sentiment?: number | null
+          source?: string | null
+          surprise_score?: number | null
+          symbol?: string
+          timestamp?: string
+        }
+        Relationships: []
+      }
       symbols: {
         Row: {
           created_at: string
@@ -86,6 +182,176 @@ export type Database = {
           sector?: string | null
           symbol?: string
           updated_at?: string
+        }
+        Relationships: []
+      }
+      technical_indicators: {
+        Row: {
+          atr_14: number | null
+          created_at: string
+          ema_20: number | null
+          ema_50: number | null
+          id: string
+          intraday_position: number | null
+          range_pct: number | null
+          rsi_14: number | null
+          symbol: string
+          timeframe: string
+          timestamp: string
+          volume_zscore: number | null
+          vwap: number | null
+          vwap_distance_pct: number | null
+        }
+        Insert: {
+          atr_14?: number | null
+          created_at?: string
+          ema_20?: number | null
+          ema_50?: number | null
+          id?: string
+          intraday_position?: number | null
+          range_pct?: number | null
+          rsi_14?: number | null
+          symbol: string
+          timeframe: string
+          timestamp: string
+          volume_zscore?: number | null
+          vwap?: number | null
+          vwap_distance_pct?: number | null
+        }
+        Update: {
+          atr_14?: number | null
+          created_at?: string
+          ema_20?: number | null
+          ema_50?: number | null
+          id?: string
+          intraday_position?: number | null
+          range_pct?: number | null
+          rsi_14?: number | null
+          symbol?: string
+          timeframe?: string
+          timestamp?: string
+          volume_zscore?: number | null
+          vwap?: number | null
+          vwap_distance_pct?: number | null
+        }
+        Relationships: []
+      }
+      training_metrics: {
+        Row: {
+          action_buy_pct: number | null
+          action_hold_pct: number | null
+          action_sell_pct: number | null
+          avg_rr: number | null
+          created_at: string
+          entropy: number | null
+          epoch: number
+          good_skips: number | null
+          id: string
+          max_drawdown: number | null
+          mean_reward: number | null
+          missed_winners: number | null
+          policy_loss: number | null
+          profit_factor: number | null
+          run_id: string
+          sharpe_ratio: number | null
+          split: string
+          value_loss: number | null
+          win_rate: number | null
+        }
+        Insert: {
+          action_buy_pct?: number | null
+          action_hold_pct?: number | null
+          action_sell_pct?: number | null
+          avg_rr?: number | null
+          created_at?: string
+          entropy?: number | null
+          epoch: number
+          good_skips?: number | null
+          id?: string
+          max_drawdown?: number | null
+          mean_reward?: number | null
+          missed_winners?: number | null
+          policy_loss?: number | null
+          profit_factor?: number | null
+          run_id: string
+          sharpe_ratio?: number | null
+          split: string
+          value_loss?: number | null
+          win_rate?: number | null
+        }
+        Update: {
+          action_buy_pct?: number | null
+          action_hold_pct?: number | null
+          action_sell_pct?: number | null
+          avg_rr?: number | null
+          created_at?: string
+          entropy?: number | null
+          epoch?: number
+          good_skips?: number | null
+          id?: string
+          max_drawdown?: number | null
+          mean_reward?: number | null
+          missed_winners?: number | null
+          policy_loss?: number | null
+          profit_factor?: number | null
+          run_id?: string
+          sharpe_ratio?: number | null
+          split?: string
+          value_loss?: number | null
+          win_rate?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "training_metrics_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "training_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      training_runs: {
+        Row: {
+          best_checkpoint_path: string | null
+          best_val_sharpe: number | null
+          completed_at: string | null
+          created_at: string
+          current_epoch: number | null
+          hyperparams: Json
+          id: string
+          phase: string
+          run_name: string
+          started_at: string
+          status: string
+          total_epochs: number | null
+        }
+        Insert: {
+          best_checkpoint_path?: string | null
+          best_val_sharpe?: number | null
+          completed_at?: string | null
+          created_at?: string
+          current_epoch?: number | null
+          hyperparams: Json
+          id?: string
+          phase: string
+          run_name: string
+          started_at?: string
+          status?: string
+          total_epochs?: number | null
+        }
+        Update: {
+          best_checkpoint_path?: string | null
+          best_val_sharpe?: number | null
+          completed_at?: string | null
+          created_at?: string
+          current_epoch?: number | null
+          hyperparams?: Json
+          id?: string
+          phase?: string
+          run_name?: string
+          started_at?: string
+          status?: string
+          total_epochs?: number | null
         }
         Relationships: []
       }
