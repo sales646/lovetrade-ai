@@ -520,81 +520,136 @@ export default function Training() {
       {/* Local GPU Training */}
       <Card className="border-2 border-primary/20 bg-primary/5">
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <Cpu className="h-5 w-5 text-primary" />
-                Local GPU Training
-              </CardTitle>
-              <CardDescription>
-                Train with your CUDA GPU for 5-10x faster training
-              </CardDescription>
+          <CardTitle className="flex items-center gap-2">
+            <Cpu className="h-5 w-5 text-primary" />
+            Local GPU Training (Optional)
+          </CardTitle>
+          <CardDescription>
+            Supercharge training with your CUDA GPU - 5-10x faster than cloud
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          {/* GPU Status & Stats */}
+          <div className="rounded-lg border-2 border-primary/30 bg-gradient-to-br from-primary/10 to-primary/5 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-xl font-bold mb-2">GPU Status</h3>
+                {localGPUStatus?.isActive ? (
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">
+                      🟢 {localGPUStatus.activeCount} worker{localGPUStatus.activeCount !== 1 ? 's' : ''} active
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Total scenarios trained: <span className="font-mono font-bold text-primary">{localGPUStatus.totalEpisodes || 0}</span>
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">⚪ No GPU workers detected</p>
+                )}
+              </div>
+              {localGPUStatus?.isActive && (
+                <Badge variant="default" className="animate-pulse text-lg px-4 py-2">
+                  <Activity className="mr-2 h-5 w-5" />
+                  Training
+                </Badge>
+              )}
             </div>
-            {localGPUStatus?.isActive && (
-              <Badge variant="default" className="animate-pulse">
-                <Activity className="mr-1 h-3 w-3" />
-                {localGPUStatus.activeCount} Active
-              </Badge>
+            
+            {/* Quick Stats */}
+            {localGPUStatus?.recentRuns && localGPUStatus.recentRuns.length > 0 && (
+              <div className="grid grid-cols-3 gap-3 mt-4">
+                <div className="rounded-lg border border-border bg-card p-3">
+                  <div className="text-xs text-muted-foreground mb-1">Recent Runs</div>
+                  <div className="text-2xl font-bold">{localGPUStatus.recentRuns.length}</div>
+                </div>
+                <div className="rounded-lg border border-border bg-card p-3">
+                  <div className="text-xs text-muted-foreground mb-1">Active Workers</div>
+                  <div className="text-2xl font-bold">{localGPUStatus.activeCount}</div>
+                </div>
+                <div className="rounded-lg border border-border bg-card p-3">
+                  <div className="text-xs text-muted-foreground mb-1">Total Episodes</div>
+                  <div className="text-2xl font-bold">{localGPUStatus.totalEpisodes || 0}</div>
+                </div>
+              </div>
             )}
           </div>
-        </CardHeader>
-        <CardContent>
+
+          {/* One-Click Setup */}
           <div className="space-y-4">
-            <div className="rounded-lg border border-primary/30 bg-card p-4">
+            <div>
               <h4 className="font-semibold mb-3 flex items-center gap-2">
                 <Zap className="h-4 w-4 text-primary" />
-                Quick Start Guide
+                One-Click GPU Training
               </h4>
-              <ol className="space-y-2 text-sm text-muted-foreground">
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="rounded-lg border-2 border-green-500/30 bg-green-500/10 p-4 hover:border-green-500/50 transition-colors cursor-pointer"
+                     onClick={() => window.open('file:///'+window.location.pathname.split('/').slice(0, -1).join('/')+'/python_training/START_GPU_TRAINING.bat', '_self')}>
+                  <div className="flex items-start justify-between mb-2">
+                    <div>
+                      <h5 className="font-bold text-green-600 mb-1">Single Worker</h5>
+                      <p className="text-xs text-muted-foreground">One BC + PPO training run</p>
+                    </div>
+                    <Play className="h-5 w-5 text-green-600" />
+                  </div>
+                  <code className="text-xs bg-card px-2 py-1 rounded block mt-2">START_GPU_TRAINING.bat</code>
+                  <div className="text-xs text-muted-foreground mt-2">⏱️ ~2-5 minutes per run</div>
+                </div>
+                
+                <div className="rounded-lg border-2 border-blue-500/30 bg-blue-500/10 p-4 hover:border-blue-500/50 transition-colors cursor-pointer"
+                     onClick={() => window.open('file:///'+window.location.pathname.split('/').slice(0, -1).join('/')+'/python_training/START_PARALLEL_GPU_TRAINING.bat', '_self')}>
+                  <div className="flex items-start justify-between mb-2">
+                    <div>
+                      <h5 className="font-bold text-blue-600 mb-1">Parallel (5 Workers)</h5>
+                      <p className="text-xs text-muted-foreground">Continuous training, 5x throughput</p>
+                    </div>
+                    <Activity className="h-5 w-5 text-blue-600 animate-pulse" />
+                  </div>
+                  <code className="text-xs bg-card px-2 py-1 rounded block mt-2">START_PARALLEL_GPU_TRAINING.bat</code>
+                  <div className="text-xs text-muted-foreground mt-2">🔥 Recommended for aggressive training</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
+              <h5 className="font-semibold text-sm mb-2">How It Works:</h5>
+              <ol className="space-y-1 text-xs text-muted-foreground">
                 <li className="flex items-start gap-2">
                   <span className="font-bold text-primary">1.</span>
-                  <span>Open <code className="px-1 py-0.5 bg-muted rounded text-xs">python_training</code> folder</span>
+                  <span>Cloud generates new data every 60s → Stored in Supabase</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <span className="font-bold text-primary">2.</span>
-                  <span>Double-click <code className="px-1 py-0.5 bg-muted rounded text-xs">START_GPU_TRAINING.bat</code> (single run) or <code className="px-1 py-0.5 bg-muted rounded text-xs">START_PARALLEL_GPU_TRAINING.bat</code> (5 workers)</span>
+                  <span>GPU workers fetch latest data → Train BC + PPO policies</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <span className="font-bold text-primary">3.</span>
-                  <span>Training metrics will automatically appear in this dashboard!</span>
+                  <span>Results sync back to dashboard → Real-time metrics visible here</span>
                 </li>
               </ol>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-2">
-              <div className="rounded-lg border border-border bg-muted/50 p-3">
-                <h5 className="font-medium text-sm mb-1">Single Training</h5>
-                <p className="text-xs text-muted-foreground mb-2">BC + PPO in ~2-5 min</p>
-                <code className="text-xs bg-card px-2 py-1 rounded block">START_GPU_TRAINING.bat</code>
-              </div>
-              <div className="rounded-lg border border-border bg-muted/50 p-3">
-                <h5 className="font-medium text-sm mb-1">Parallel (5 Workers)</h5>
-                <p className="text-xs text-muted-foreground mb-2">5x throughput, continuous</p>
-                <code className="text-xs bg-card px-2 py-1 rounded block">START_PARALLEL_GPU_TRAINING.bat</code>
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-primary/20 bg-primary/5 p-3">
-              <p className="text-xs text-muted-foreground">
-                <strong className="text-primary">Architecture:</strong> Cloud auto-generates training data every 60s → 
-                Your GPU trains BC+PPO policies → Results sync to this dashboard in real-time
-              </p>
-            </div>
-
+            {/* Recent Runs Table */}
             {localGPUStatus?.recentRuns && localGPUStatus.recentRuns.length > 0 && (
-              <div className="rounded-lg border border-border bg-card p-3">
-                <h5 className="font-medium text-sm mb-2">Recent Local Runs</h5>
-                <div className="space-y-1">
-                  {localGPUStatus.recentRuns.slice(0, 3).map((run) => (
-                    <div key={run.id} className="flex items-center justify-between text-xs">
-                      <span className="text-muted-foreground">{run.run_name}</span>
-                      <Badge variant={run.status === "running" ? "default" : "secondary"} className="text-xs">
+              <details className="rounded-lg border border-border">
+                <summary className="cursor-pointer p-4 font-semibold hover:bg-muted/50">
+                  Recent GPU Training Runs ({localGPUStatus.recentRuns.length})
+                </summary>
+                <div className="p-4 pt-0 space-y-2 border-t">
+                  {localGPUStatus.recentRuns.slice(0, 5).map((run) => (
+                    <div key={run.id} className="flex items-center justify-between p-2 rounded bg-muted/30">
+                      <div className="flex-1">
+                        <div className="font-medium text-sm">{run.run_name}</div>
+                        <div className="text-xs text-muted-foreground">
+                          Phase: {run.phase} | {run.current_epoch}/{run.total_epochs} epochs
+                        </div>
+                      </div>
+                      <Badge variant={run.status === "running" ? "default" : run.status === "completed" ? "secondary" : "destructive"}>
                         {run.status}
                       </Badge>
                     </div>
                   ))}
                 </div>
-              </div>
+              </details>
             )}
           </div>
         </CardContent>

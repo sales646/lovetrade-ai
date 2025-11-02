@@ -183,12 +183,20 @@ export function useLocalGPUTrainingStatus() {
       
       const { data, error } = await supabase
         .from("training_runs")
-        .select("id, run_name, status, phase, started_at")
+        .select("*")
         .gte("started_at", fiveMinutesAgo)
         .order("started_at", { ascending: false })
-        .limit(5);
+        .limit(10);
 
       if (error) throw error;
+
+      // Get total episodes from training_metrics
+      const { count: totalEpisodes, error: metricsError } = await supabase
+        .from("training_metrics")
+        .select("*", { count: "exact", head: true })
+        .in("run_id", (data || []).map(r => r.id));
+
+      if (metricsError) console.error("Error fetching metrics count:", metricsError);
       
       const activeRuns = data?.filter(run => run.status === "running") || [];
       const recentCompletedRuns = data?.filter(run => 
@@ -200,6 +208,7 @@ export function useLocalGPUTrainingStatus() {
         isActive: activeRuns.length > 0 || recentCompletedRuns.length > 0,
         activeCount: activeRuns.length,
         recentRuns: data || [],
+        totalEpisodes: totalEpisodes || 0,
       };
     },
     refetchInterval: 10000, // Check every 10 seconds
