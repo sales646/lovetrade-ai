@@ -149,6 +149,89 @@ export type Database = {
         }
         Relationships: []
       }
+      positions: {
+        Row: {
+          current_price: number | null
+          entry_price: number
+          id: string
+          opened_at: string
+          side: string
+          size: number
+          stop_loss: number | null
+          symbol: string
+          take_profit: number | null
+          unrealized_pnl: number | null
+          updated_at: string
+        }
+        Insert: {
+          current_price?: number | null
+          entry_price: number
+          id?: string
+          opened_at?: string
+          side: string
+          size: number
+          stop_loss?: number | null
+          symbol: string
+          take_profit?: number | null
+          unrealized_pnl?: number | null
+          updated_at?: string
+        }
+        Update: {
+          current_price?: number | null
+          entry_price?: number
+          id?: string
+          opened_at?: string
+          side?: string
+          size?: number
+          stop_loss?: number | null
+          symbol?: string
+          take_profit?: number | null
+          unrealized_pnl?: number | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      risk_assessments: {
+        Row: {
+          adjusted_size: number
+          assessed_at: string
+          factors: Json
+          id: string
+          reason: string
+          risk_score: number
+          should_execute: boolean
+          signal_id: string | null
+        }
+        Insert: {
+          adjusted_size: number
+          assessed_at?: string
+          factors: Json
+          id?: string
+          reason: string
+          risk_score: number
+          should_execute: boolean
+          signal_id?: string | null
+        }
+        Update: {
+          adjusted_size?: number
+          assessed_at?: string
+          factors?: Json
+          id?: string
+          reason?: string
+          risk_score?: number
+          should_execute?: boolean
+          signal_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "risk_assessments_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "trading_signals"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       symbols: {
         Row: {
           created_at: string
@@ -182,6 +265,33 @@ export type Database = {
           sector?: string | null
           symbol?: string
           updated_at?: string
+        }
+        Relationships: []
+      }
+      system_logs: {
+        Row: {
+          created_at: string
+          id: string
+          level: string
+          message: string
+          metadata: Json | null
+          source: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          level: string
+          message: string
+          metadata?: Json | null
+          source: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          level?: string
+          message?: string
+          metadata?: Json | null
+          source?: string
         }
         Relationships: []
       }
@@ -233,6 +343,105 @@ export type Database = {
           volume_zscore?: number | null
           vwap?: number | null
           vwap_distance_pct?: number | null
+        }
+        Relationships: []
+      }
+      trades: {
+        Row: {
+          action: string
+          closed_at: string | null
+          entry_price: number
+          executed_at: string
+          exit_price: number | null
+          id: string
+          pnl: number | null
+          risk_assessment_id: string | null
+          signal_id: string | null
+          size: number
+          status: string
+          stop_loss: number | null
+          symbol: string
+          take_profit: number | null
+        }
+        Insert: {
+          action: string
+          closed_at?: string | null
+          entry_price: number
+          executed_at?: string
+          exit_price?: number | null
+          id?: string
+          pnl?: number | null
+          risk_assessment_id?: string | null
+          signal_id?: string | null
+          size: number
+          status?: string
+          stop_loss?: number | null
+          symbol: string
+          take_profit?: number | null
+        }
+        Update: {
+          action?: string
+          closed_at?: string | null
+          entry_price?: number
+          executed_at?: string
+          exit_price?: number | null
+          id?: string
+          pnl?: number | null
+          risk_assessment_id?: string | null
+          signal_id?: string | null
+          size?: number
+          status?: string
+          stop_loss?: number | null
+          symbol?: string
+          take_profit?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "trades_risk_assessment_id_fkey"
+            columns: ["risk_assessment_id"]
+            isOneToOne: false
+            referencedRelation: "risk_assessments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "trades_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "trading_signals"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      trading_signals: {
+        Row: {
+          action: string
+          confidence: number
+          created_at: string
+          id: string
+          market_data: Json
+          proposed_size: number
+          source: string
+          symbol: string
+        }
+        Insert: {
+          action: string
+          confidence: number
+          created_at?: string
+          id?: string
+          market_data: Json
+          proposed_size: number
+          source: string
+          symbol: string
+        }
+        Update: {
+          action?: string
+          confidence?: number
+          created_at?: string
+          id?: string
+          market_data?: Json
+          proposed_size?: number
+          source?: string
+          symbol?: string
         }
         Relationships: []
       }

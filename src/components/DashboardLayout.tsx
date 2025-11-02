@@ -22,6 +22,7 @@ const navigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Watchlist", href: "/watchlist", icon: Eye },
   { name: "Orders", href: "/orders", icon: ShoppingCart },
+  { name: "Auto Trading", href: "/auto-trading", icon: Activity },
   { name: "Strategies", href: "/strategies", icon: Zap },
   { name: "Training", href: "/training", icon: Brain },
   { name: "Logs", href: "/logs", icon: ScrollText },

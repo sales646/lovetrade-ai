@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.assess-risk]
 verify_jwt = false
+
+[functions.autonomous-trader]
+verify_jwt = false

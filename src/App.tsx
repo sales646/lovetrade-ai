@@ -11,6 +11,7 @@ import Strategies from "./pages/Strategies";
 import Training from "./pages/Training";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
+import AutoTrading from "./pages/AutoTrading";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -26,6 +27,7 @@ const App = () => (
             <Route path="/" element={<Dashboard />} />
             <Route path="/watchlist" element={<Watchlist />} />
             <Route path="/orders" element={<Orders />} />
+            <Route path="/auto-trading" element={<AutoTrading />} />
             <Route path="/strategies" element={<Strategies />} />
             <Route path="/training" element={<Training />} />
             <Route path="/logs" element={<Logs />} />
