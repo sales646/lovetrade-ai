@@ -238,6 +238,51 @@ export type Database = {
         }
         Relationships: []
       }
+      macro_data: {
+        Row: {
+          created_at: string
+          dxy_change_pct: number
+          dxy_price: number
+          id: string
+          market_regime: string
+          risk_off: boolean
+          risk_on: boolean
+          spy_change_pct: number
+          spy_price: number
+          timestamp: string
+          treasury_yield_10y: number
+          vix: number
+        }
+        Insert: {
+          created_at?: string
+          dxy_change_pct: number
+          dxy_price: number
+          id?: string
+          market_regime: string
+          risk_off?: boolean
+          risk_on?: boolean
+          spy_change_pct: number
+          spy_price: number
+          timestamp?: string
+          treasury_yield_10y: number
+          vix: number
+        }
+        Update: {
+          created_at?: string
+          dxy_change_pct?: number
+          dxy_price?: number
+          id?: string
+          market_regime?: string
+          risk_off?: boolean
+          risk_on?: boolean
+          spy_change_pct?: number
+          spy_price?: number
+          timestamp?: string
+          treasury_yield_10y?: number
+          vix?: number
+        }
+        Relationships: []
+      }
       news_features: {
         Row: {
           article_snippet: string | null
@@ -275,6 +320,51 @@ export type Database = {
           sentiment?: number | null
           source?: string | null
           surprise_score?: number | null
+          symbol?: string
+          timestamp?: string
+        }
+        Relationships: []
+      }
+      news_sentiment: {
+        Row: {
+          article_count: number
+          bearish_count: number
+          bullish_count: number
+          confidence: number
+          created_at: string
+          id: string
+          key_themes: Json | null
+          market_impact: string | null
+          neutral_count: number
+          overall_sentiment: number
+          symbol: string
+          timestamp: string
+        }
+        Insert: {
+          article_count?: number
+          bearish_count?: number
+          bullish_count?: number
+          confidence?: number
+          created_at?: string
+          id?: string
+          key_themes?: Json | null
+          market_impact?: string | null
+          neutral_count?: number
+          overall_sentiment?: number
+          symbol: string
+          timestamp?: string
+        }
+        Update: {
+          article_count?: number
+          bearish_count?: number
+          bullish_count?: number
+          confidence?: number
+          created_at?: string
+          id?: string
+          key_themes?: Json | null
+          market_impact?: string | null
+          neutral_count?: number
+          overall_sentiment?: number
           symbol?: string
           timestamp?: string
         }

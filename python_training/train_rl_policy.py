@@ -55,7 +55,7 @@ class TrainingConfig:
     
     # Features - INCREASED FOR BETTER CONTEXT
     frame_stack_size: int = 64  # Doubled from 32 for more historical context
-    feature_dim: int = 15  # Technical indicators per bar
+    feature_dim: int = 25  # Expanded: 15 technical + 5 news/macro + 5 time features
     
     # BC Training - OPTIMIZED FOR BETTER LEARNING
     bc_epochs: int = 100  # Increased from 50 for better convergence
@@ -143,25 +143,59 @@ class TrajectoryDataset(Dataset):
         logger.info(f"Action distribution: {np.bincount(self.actions)}")
     
     def _parse_frame_stack(self, obs_features: Dict) -> np.ndarray:
-        """Extract frame stack features with normalization"""
+        """Extract frame stack features with normalization + news/macro/time context"""
         frame_stack = obs_features.get('frame_stack', [])
+        
+        # Get latest news sentiment for this symbol (cache or default)
+        news_sentiment = obs_features.get('news_sentiment', 0)
+        news_confidence = obs_features.get('news_confidence', 0)
+        
+        # Get macro data (cache or default)
+        vix = obs_features.get('vix', 15) / 50  # Normalize VIX
+        spy_change = obs_features.get('spy_change_pct', 0) / 10  # Normalize SPY change
+        market_risk = 1.0 if obs_features.get('risk_off', False) else 0.0
+        
+        # Time features
+        timestamp = obs_features.get('timestamp', '')
+        hour = int(timestamp[11:13]) if len(timestamp) > 13 else 12
+        day_of_week = obs_features.get('day_of_week', 2)  # 0=Monday, 4=Friday
+        
+        is_market_open = 1.0 if 9.5 <= hour <= 16 else 0.0  # Market hours 9:30-16:00
+        is_premarket = 1.0 if 4 <= hour < 9.5 else 0.0
+        is_afterhours = 1.0 if 16 < hour <= 20 else 0.0
+        end_of_week = 1.0 if day_of_week >= 3 else 0.0  # Thursday-Friday
         
         features = []
         for frame in frame_stack[-self.config.frame_stack_size:]:
-            # Normalize features for better learning
+            # Normalize technical features
             close = frame.get('close', 0)
             features.append([
+                # Technical (6 features)
                 close / 100.0,  # Normalize price
                 frame.get('volume', 0) / 1e6,  # Normalize volume to millions
                 (frame.get('rsi_14', 50) - 50) / 50,  # Center RSI around 0
                 frame.get('atr_14', 0) / close if close > 0 else 0,  # ATR as % of price
                 frame.get('vwap_distance_pct', 0) / 10,  # Scale VWAP distance
                 frame.get('volume_zscore', 0) / 3,  # Normalize z-score
+                
+                # News/Macro context (5 features) - same for all frames in stack
+                news_sentiment,
+                news_confidence,
+                vix,
+                spy_change,
+                market_risk,
+                
+                # Time features (5 features) - same for all frames
+                is_market_open,
+                is_premarket,
+                is_afterhours,
+                end_of_week,
+                hour / 24.0,  # Normalized hour
             ])
         
         # Pad if necessary
         while len(features) < self.config.frame_stack_size:
-            features.insert(0, [0] * 6)
+            features.insert(0, [0] * 16)  # 16 features per frame
         
         return np.array(features, dtype=np.float32).flatten()
     
@@ -331,8 +365,8 @@ class TradingEnv(gym.Env):
         # Action space: {0: SELL, 1: HOLD, 2: BUY}
         self.action_space = spaces.Discrete(3)
         
-        # Observation space: flattened frame stack (64 bars * 6 features)
-        obs_dim = config.frame_stack_size * 6  # 384 features for better context
+        # Observation space: flattened frame stack (64 bars * 16 features = 1024)
+        obs_dim = config.frame_stack_size * 16  # 16 features per bar (tech+news+macro+time)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         
         self.steps_in_episode = 0
@@ -469,6 +503,22 @@ class TradingEnv(gym.Env):
         traj = self.trajectories[self.current_idx]
         obs_features = traj['obs_features']
         
+        # Extract context data
+        news_sentiment = obs_features.get('news_sentiment', 0)
+        news_confidence = obs_features.get('news_confidence', 0)
+        vix = obs_features.get('vix', 15) / 50
+        spy_change = obs_features.get('spy_change_pct', 0) / 10
+        market_risk = 1.0 if obs_features.get('risk_off', False) else 0.0
+        
+        # Time features
+        timestamp = obs_features.get('timestamp', '')
+        hour = int(timestamp[11:13]) if len(timestamp) > 13 else 12
+        day_of_week = obs_features.get('day_of_week', 2)
+        is_market_open = 1.0 if 9.5 <= hour <= 16 else 0.0
+        is_premarket = 1.0 if 4 <= hour < 9.5 else 0.0
+        is_afterhours = 1.0 if 16 < hour <= 20 else 0.0
+        end_of_week = 1.0 if day_of_week >= 3 else 0.0
+        
         frame_stack = obs_features.get('frame_stack', [])
         features = []
         
@@ -482,10 +532,20 @@ class TradingEnv(gym.Env):
                 frame.get('atr_14', 0) / close if close > 0 else 0,
                 frame.get('vwap_distance_pct', 0) / 10,
                 frame.get('volume_zscore', 0) / 3,
+                news_sentiment,
+                news_confidence,
+                vix,
+                spy_change,
+                market_risk,
+                is_market_open,
+                is_premarket,
+                is_afterhours,
+                end_of_week,
+                hour / 24.0,
             ])
         
         while len(features) < self.config.frame_stack_size:
-            features.insert(0, [0] * 6)
+            features.insert(0, [0] * 16)
         
         return np.array(features, dtype=np.float32).flatten()
 

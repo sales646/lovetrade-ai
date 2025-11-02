@@ -41,3 +41,15 @@ verify_jwt = false
 
 [functions.strategy-promoter]
 verify_jwt = false
+
+[functions.autonomous-training-loop]
+verify_jwt = false
+
+[functions.fetch-alpaca-account]
+verify_jwt = false
+
+[functions.news-analyzer]
+verify_jwt = false
+
+[functions.macro-data-fetcher]
+verify_jwt = false

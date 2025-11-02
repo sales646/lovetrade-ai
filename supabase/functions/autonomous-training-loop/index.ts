@@ -61,6 +61,18 @@ async function runContinuousTraining() {
       loopCount++;
       await log("INFO", `🔄 Training loop iteration #${loopCount}`);
       
+      // 0. Fetch macro-economic data FIRST
+      await log("INFO", "📊 Fetching macro-economic indicators...");
+      const macroResponse = await supabase.functions.invoke("macro-data-fetcher", {
+        body: {}
+      });
+      
+      if (macroResponse.error) {
+        await log("WARN", "Macro data fetch failed (non-critical)", { error: macroResponse.error });
+      } else {
+        await log("INFO", `✅ Macro data: VIX=${macroResponse.data.data.vix.toFixed(2)}, Regime=${macroResponse.data.data.market_regime}`);
+      }
+      
       // 1. Generate data - MAXIMIZED FOR MARKET DIVERSITY
       await log("INFO", "📊 Generating comprehensive training data from Yahoo Finance...");
       const dataResponse = await supabase.functions.invoke("auto-data-generator", {
@@ -90,6 +102,23 @@ async function runContinuousTraining() {
         await log("ERROR", "Data generation failed", { error: dataResponse.error });
       } else {
         await log("INFO", "✅ Data generation complete");
+      }
+      
+      // 1.5. Analyze news sentiment for all symbols
+      await log("INFO", "📰 Analyzing news sentiment...");
+      const newsResponse = await supabase.functions.invoke("news-analyzer", {
+        body: {
+          symbols: [
+            "SPY", "QQQ", "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META"
+          ]
+        }
+      });
+      
+      if (newsResponse.error) {
+        await log("WARN", "News analysis failed (non-critical)", { error: newsResponse.error });
+      } else {
+        const avgSentiment = newsResponse.data.results.reduce((sum: number, r: any) => sum + r.sentiment, 0) / newsResponse.data.results.length;
+        await log("INFO", `✅ News analysis complete: avg sentiment=${avgSentiment.toFixed(2)}`);
       }
       
       // Wait 2 seconds for data to settle
