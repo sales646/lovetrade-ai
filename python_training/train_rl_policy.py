@@ -31,6 +31,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Detect device (GPU if available, else CPU)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger.info(f"Using device: {device}")
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -207,14 +211,15 @@ def train_bc(
     train_dataset: TrajectoryDataset,
     val_dataset: TrajectoryDataset,
     config: TrainingConfig,
-    run_id: str
+    run_id: str,
+    device: torch.device = torch.device("cpu")
 ) -> BCPolicy:
     """Train behavior cloning policy"""
     
     logger.info("Starting Behavior Cloning training")
     
     obs_dim = train_dataset.obs.shape[1]
-    policy = BCPolicy(obs_dim)
+    policy = BCPolicy(obs_dim).to(device)  # Move to GPU
     
     train_loader = DataLoader(train_dataset, batch_size=config.bc_batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config.bc_batch_size)
@@ -233,6 +238,9 @@ def train_bc(
         train_total = 0
         
         for obs, actions, rewards, weights in train_loader:
+            # Move to device
+            obs, actions, weights = obs.to(device), actions.to(device), weights.to(device)
+            
             optimizer.zero_grad()
             
             logits = policy(obs)
@@ -257,6 +265,9 @@ def train_bc(
         
         with torch.no_grad():
             for obs, actions, rewards, weights in val_loader:
+                # Move to device
+                obs, actions, weights = obs.to(device), actions.to(device), weights.to(device)
+                
                 logits = policy(obs)
                 loss = criterion(logits, actions)
                 weighted_loss = (loss * weights).mean()
@@ -282,7 +293,7 @@ def train_bc(
                 break
     
     # Load best model
-    policy.load_state_dict(torch.load(f"checkpoints/policy_bc_{run_id}.pt"))
+    policy.load_state_dict(torch.load(f"checkpoints/policy_bc_{run_id}.pt", map_location=device))
     
     return policy
 
@@ -405,7 +416,7 @@ def train_ppo(
     # Create environment
     env = DummyVecEnv([lambda: TradingEnv(train_trajectories, config)])
     
-    # Initialize PPO
+    # Initialize PPO with GPU support
     model = PPO(
         "MlpPolicy",
         env,
@@ -419,6 +430,7 @@ def train_ppo(
         ent_coef=config.ppo_ent_coef,
         max_grad_norm=config.ppo_max_grad_norm,
         verbose=1,
+        device="auto",  # Auto-detect GPU/CPU
     )
     
     # TODO: Load BC weights into PPO policy (requires model surgery)
@@ -486,7 +498,7 @@ def main():
     
     # Train BC
     os.makedirs("checkpoints", exist_ok=True)
-    bc_policy = train_bc(train_dataset, val_dataset, config, run_id)
+    bc_policy = train_bc(train_dataset, val_dataset, config, run_id, device)
     
     # Update phase
     client.table("training_runs").update({"phase": "ppo_finetuning"}).eq("id", run_id).execute()
