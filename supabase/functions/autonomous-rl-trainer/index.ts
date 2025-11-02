@@ -182,16 +182,37 @@ function selectAction(stateKey: string, qState: QState): number {
   }
 }
 
-// Calculate position size based on account equity and risk
-function calculatePositionSize(entryPrice: number, stopDistance: number): { shares: number; dollarSize: number } {
-  // Risk amount in dollars
-  const riskDollars = ACCOUNT_EQUITY * (RISK_PER_TRADE_PCT / 100);
+// Calculate position size based on account equity, risk, and confidence
+function calculatePositionSize(
+  entryPrice: number, 
+  stopDistance: number,
+  qValues: number[],
+  actionIdx: number
+): { shares: number; dollarSize: number; confidenceFactor: number } {
+  // Calculate confidence from Q-value spread
+  const maxQ = Math.max(...qValues);
+  const minQ = Math.min(...qValues);
+  const selectedQ = qValues[actionIdx];
   
-  // Shares = Risk$ / (Entry - Stop) = Risk$ / StopDistance
-  const shares = Math.floor(riskDollars / stopDistance);
+  // Confidence factor: 0.1 (low confidence) to 1.0 (high confidence)
+  // If Q-values are similar, confidence is low. If big spread and we picked max, high confidence.
+  const qSpread = maxQ - minQ;
+  const qAdvantage = qSpread > 0 ? (selectedQ - minQ) / qSpread : 0.5;
+  
+  // Base confidence on Q-advantage: 0.1 minimum, 1.0 maximum
+  const confidenceFactor = Math.max(0.1, Math.min(1.0, qAdvantage));
+  
+  // Base risk amount (use full buying power as max)
+  const maxRiskDollars = ACCOUNT_EQUITY * (RISK_PER_TRADE_PCT / 100);
+  
+  // Scale risk by confidence
+  const adjustedRiskDollars = maxRiskDollars * confidenceFactor;
+  
+  // Shares = Risk$ / StopDistance
+  const shares = Math.floor(adjustedRiskDollars / stopDistance);
   const dollarSize = shares * entryPrice;
   
-  return { shares, dollarSize };
+  return { shares, dollarSize, confidenceFactor };
 }
 
 // Simulate a realistic trade with stops, targets, fees, and slippage
@@ -200,6 +221,8 @@ function simulateTradeOutcome(
   entryIndex: number,
   side: "BUY" | "SELL",
   atr: number,
+  qValues: number[],
+  actionIdx: number,
   maxHoldBars: number = 12
 ) {
   const entryBar = bars[entryIndex];
@@ -272,16 +295,23 @@ function simulateTradeOutcome(
   // Apply slippage and fees
   const netPnlPct = grossPnlPct - slippagePct - feesPct;
   
-  // Calculate position size based on risk management
-  const positionData = calculatePositionSize(entryPrice, stopLossDistance);
+  // Calculate position size based on risk management AND confidence
+  const positionData = calculatePositionSize(entryPrice, stopLossDistance, qValues, actionIdx);
   
   // Calculate dollar P&L
   const dollarPnl = positionData.dollarSize * (netPnlPct / 100);
   
-  // Reward scaling based on DOLLAR P&L
+  // Reward scaling based on DOLLAR P&L AND position sizing efficiency
   // Scale by account size: $1000 profit on $100k account = +1.0 reward
   const rewardScaleFactor = ACCOUNT_EQUITY / 1000;
-  const reward = dollarPnl / rewardScaleFactor;
+  let reward = dollarPnl / rewardScaleFactor;
+  
+  // Bonus/penalty for position sizing optimization
+  // If we won with high confidence (large position), extra reward
+  // If we lost with high confidence (large position), extra penalty
+  // If we won/lost with low confidence (small position), less impact
+  const sizingBonus = reward * (positionData.confidenceFactor - 0.5); // ±50% based on sizing
+  reward += sizingBonus * 0.3; // 30% weight on sizing optimization
   
   return {
     reward,
@@ -289,6 +319,7 @@ function simulateTradeOutcome(
     pnl_dollars: dollarPnl,
     position_size: positionData.dollarSize,
     shares: positionData.shares,
+    confidence_factor: positionData.confidenceFactor,
     exit_reason: exitReason,
     bars_held: barsHeld,
   };
@@ -332,6 +363,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
   let winningTrades = 0;
   let totalReturnPct = 0;
   let totalDollarPnl = 0;
+  let totalConfidence = 0;
   
   // Simulate through historical bars with REAL trade outcomes
   for (let i = 0; i < bars.length - 15; i++) { // Leave room for trade to complete
@@ -372,6 +404,8 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
         i,
         "SELL",
         Number(indicators.atr_14),
+        qState.q_table[stateKey],
+        actionIdx,
         12 // max hold bars
       );
       reward = tradeResult.reward;
@@ -379,6 +413,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       totalTrades++;
       totalReturnPct += tradeResult.pnl_pct;
       totalDollarPnl += tradeResult.pnl_dollars;
+      totalConfidence += tradeResult.confidence_factor;
       if (reward > 0) winningTrades++;
       
       // Get state after trade completes
@@ -408,6 +443,8 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
         i,
         "BUY",
         Number(indicators.atr_14),
+        qState.q_table[stateKey],
+        actionIdx,
         12 // max hold bars
       );
       reward = tradeResult.reward;
@@ -415,6 +452,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
       totalTrades++;
       totalReturnPct += tradeResult.pnl_pct;
       totalDollarPnl += tradeResult.pnl_dollars;
+      totalConfidence += tradeResult.confidence_factor;
       if (reward > 0) winningTrades++;
       
       // Get state after trade completes
@@ -542,8 +580,9 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
   const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
   const avgReturnPct = totalTrades > 0 ? totalReturnPct / totalTrades : 0;
   const avgDollarPnl = totalTrades > 0 ? totalDollarPnl / totalTrades : 0;
+  const avgConfidence = totalTrades > 0 ? totalConfidence / totalTrades : 0;
   
-  await log("INFO", `Episode complete: ${steps} steps, reward: ${totalReward.toFixed(2)}, Win Rate: ${winRate.toFixed(1)}%, Avg Return: ${avgReturnPct.toFixed(2)}%, Avg P&L: $${avgDollarPnl.toFixed(2)}, L_RL: ${lossRL.toFixed(4)}, L_imit: ${lossImitation.toFixed(4)}, L_total: ${lossTotal.toFixed(4)}`);
+  await log("INFO", `Episode complete: ${steps} steps, reward: ${totalReward.toFixed(2)}, Win Rate: ${winRate.toFixed(1)}%, Avg Return: ${avgReturnPct.toFixed(2)}%, Avg P&L: $${avgDollarPnl.toFixed(2)}, Avg Confidence: ${(avgConfidence * 100).toFixed(1)}%, L_RL: ${lossRL.toFixed(4)}, L_imit: ${lossImitation.toFixed(4)}, L_total: ${lossTotal.toFixed(4)}`);
   
   return { 
     reward: totalReward, 
@@ -558,6 +597,7 @@ async function runSimulationEpisode(qState: QState, symbol: string) {
     winRate,
     totalReturnPct,
     totalDollarPnl,
+    avgConfidence,
   };
 }
 
@@ -585,6 +625,7 @@ async function runTrainingLoop(iterations: number = 10) {
   let totalWinningTrades = 0;
   let totalReturnPct = 0;
   let totalDollarPnl = 0;
+  let totalConfidence = 0;
   
   for (let i = 0; i < iterations; i++) {
     // Pick random symbol for each episode
@@ -607,6 +648,7 @@ async function runTrainingLoop(iterations: number = 10) {
     totalWinningTrades += result.winningTrades || 0;
     totalReturnPct += result.totalReturnPct || 0;
     totalDollarPnl += result.totalDollarPnl || 0;
+    totalConfidence += (result.avgConfidence || 0) * (result.totalTrades || 0);
     
     // Aggregate expert accuracies
     for (const [expertName, accuracy] of Object.entries(result.expertAccuracies)) {
@@ -663,6 +705,7 @@ async function runTrainingLoop(iterations: number = 10) {
   const batchWinRate = totalTrades > 0 ? (totalWinningTrades / totalTrades) * 100 : 0;
   const avgReturnPct = totalTrades > 0 ? totalReturnPct / totalTrades : 0;
   const avgDollarPnl = totalTrades > 0 ? totalDollarPnl / totalTrades : 0;
+  const avgConfidence = totalTrades > 0 ? totalConfidence / totalTrades : 0;
   
   const { data: metricData } = await supabase.from("rl_training_metrics").insert({
     episodes: iterations,
@@ -686,6 +729,7 @@ async function runTrainingLoop(iterations: number = 10) {
     avg_return_pct: avgReturnPct,
     avg_dollar_pnl: avgDollarPnl,
     account_equity: ACCOUNT_EQUITY,
+    avg_confidence: avgConfidence,
   }).select().single();
   
   // Log per-expert contributions
@@ -721,6 +765,7 @@ async function runTrainingLoop(iterations: number = 10) {
     winRate: `${batchWinRate.toFixed(1)}% (${totalWinningTrades}/${totalTrades})`,
     avgReturn: `${avgReturnPct >= 0 ? '+' : ''}${avgReturnPct.toFixed(2)}%`,
     avgDollarPnl: `$${avgDollarPnl >= 0 ? '+' : ''}${avgDollarPnl.toFixed(2)}`,
+    avgConfidence: `${(avgConfidence * 100).toFixed(1)}%`,
     accountEquity: `$${ACCOUNT_EQUITY.toLocaleString()}`,
     expertAccuracies: avgExpertAccuracies,
   });

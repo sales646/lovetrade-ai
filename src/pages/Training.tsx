@@ -286,12 +286,12 @@ export default function Training() {
               </div>
               
               <div className="rounded-lg border border-border bg-muted/30 p-3">
-                <div className="font-semibold mb-2">💰 Position Sizing</div>
+                <div className="font-semibold mb-2">💰 Dynamic Position Sizing</div>
                 <div className="space-y-1 text-muted-foreground">
-                  <div>• Risk: <span className="text-yellow-500 font-mono">100% buying power</span></div>
-                  <div>• Full account on each trade</div>
-                  <div>• Shares = BuyingPower / StopDistance</div>
-                  <div>• Rewards scaled by <span className="font-mono">$P&L</span></div>
+                  <div>• Max: <span className="text-yellow-500 font-mono">100% buying power</span></div>
+                  <div>• Actual size based on <span className="font-mono">Q-value confidence</span></div>
+                  <div>• High confidence = larger position</div>
+                  <div>• Rewards optimized sizing strategy</div>
                 </div>
               </div>
 
@@ -412,6 +412,25 @@ export default function Training() {
                 ? `Account: $${Number(latestMetric.account_equity).toLocaleString()}`
                 : "Per trade in dollars"}
             </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Avg Confidence</CardTitle>
+            <Target className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-blue-600">
+              {latestMetric?.avg_confidence 
+                ? `${(Number(latestMetric.avg_confidence) * 100).toFixed(1)}%`
+                : "—"}
+            </div>
+            <Progress 
+              value={latestMetric?.avg_confidence ? Number(latestMetric.avg_confidence) * 100 : 0} 
+              className="mt-2" 
+            />
+            <p className="text-xs text-muted-foreground mt-1">Position sizing confidence</p>
           </CardContent>
         </Card>
       </div>

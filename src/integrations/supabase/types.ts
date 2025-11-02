@@ -518,6 +518,7 @@ export type Database = {
           action_hold_pct: number | null
           action_sell_pct: number | null
           alpha_mix: number | null
+          avg_confidence: number | null
           avg_dollar_pnl: number | null
           avg_return_pct: number | null
           avg_reward: number
@@ -545,6 +546,7 @@ export type Database = {
           action_hold_pct?: number | null
           action_sell_pct?: number | null
           alpha_mix?: number | null
+          avg_confidence?: number | null
           avg_dollar_pnl?: number | null
           avg_return_pct?: number | null
           avg_reward: number
@@ -572,6 +574,7 @@ export type Database = {
           action_hold_pct?: number | null
           action_sell_pct?: number | null
           alpha_mix?: number | null
+          avg_confidence?: number | null
           avg_dollar_pnl?: number | null
           avg_return_pct?: number | null
           avg_reward?: number
