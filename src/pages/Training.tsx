@@ -127,40 +127,33 @@ export default function Training() {
     };
   }, [autoIntervalId, autoGenIntervalId]);
 
-  // Toggle master system (backend continuous training)
+  // Toggle master system (cron-based scheduled training)
   const handleToggleMasterSystem = async () => {
     const newState = !isSystemActive;
     
     if (newState) {
-      // Start the backend training loop
-      toast.loading("🚀 Starting autonomous training system...");
-      
-      const { error } = await supabase.functions.invoke("autonomous-training-loop", {
-        body: { action: "start" }
-      });
-      
-      if (error) {
-        toast.error("Failed to start training system");
-        console.error(error);
-        return;
-      }
-      
       // Enable in bot_config
-      await supabase
+      const { error } = await supabase
         .from("bot_config")
         .update({ is_active: true })
         .eq("id", "00000000-0000-0000-0000-000000000000");
       
-      toast.success("🎯 Autonomous training system activated! It will continue running even if you leave this page.");
+      if (error) {
+        toast.error("Failed to activate training system");
+        console.error(error);
+        return;
+      }
+      
+      toast.success("🎯 Autonomous training activated! Runs automatically every 5 minutes via cron job.");
       setIsSystemActive(true);
     } else {
-      // Disable in bot_config (the loop will stop itself)
+      // Disable in bot_config (cron job will skip when inactive)
       await supabase
         .from("bot_config")
         .update({ is_active: false })
         .eq("id", "00000000-0000-0000-0000-000000000000");
       
-      toast.info("🛑 Training system will stop after current iteration");
+      toast.info("🛑 Training system deactivated");
       setIsSystemActive(false);
     }
   };
