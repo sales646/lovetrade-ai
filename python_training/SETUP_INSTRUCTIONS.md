@@ -2,6 +2,26 @@
 
 Your local GPU training is now connected to the cloud! All training metrics automatically sync to your dashboard.
 
+## Installation (Required First!)
+
+**Before running training, install dependencies:**
+
+```bash
+# Navigate to python_training folder
+cd python_training
+
+# Install all required packages
+pip install -r requirements.txt
+
+# For GPU support (CUDA 12.1)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Verify GPU is detected
+python check_gpu.py
+```
+
+You should see "CUDA Available: True" and your GPU name. If not, see troubleshooting below.
+
 ## Quick Start
 
 ### Option 1: Single Training Run (Recommended for Testing)
