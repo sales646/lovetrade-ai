@@ -7,8 +7,8 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Brain, Zap, TrendingUp, Activity, Cpu, Target, Play, Pause } from "lucide-react";
 import { useStartAutonomousTraining, useRLMetrics, useQState } from "@/lib/api/autonomous-training";
-import { Line } from "recharts";
-import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from "recharts";
+import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { toast } from "sonner";
 
 export default function Training() {
@@ -365,22 +365,50 @@ export default function Training() {
             <CardDescription>Average reward and exploration rate over recent episodes</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="h-[300px]">
-              <ChartContainer
-                config={{
-                  reward: { label: "Avg Reward", color: "hsl(var(--primary))" },
-                  epsilon: { label: "Epsilon", color: "hsl(var(--destructive))" },
-                }}
-              >
-                <Line
-                  data={chartData}
-                  dataKey="reward"
-                  stroke="var(--color-reward)"
-                  strokeWidth={2}
-                />
-                <ChartTooltip />
-              </ChartContainer>
-            </div>
+            <ChartContainer
+              config={{
+                reward: { 
+                  label: "Avg Reward", 
+                  color: "hsl(var(--primary))" 
+                },
+                epsilon: { 
+                  label: "Epsilon (ε)", 
+                  color: "hsl(var(--chart-2))" 
+                },
+              }}
+              className="h-[300px]"
+            >
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                  <XAxis 
+                    dataKey="episode" 
+                    className="text-xs"
+                    label={{ value: "Episode", position: "insideBottom", offset: -5 }}
+                  />
+                  <YAxis 
+                    className="text-xs"
+                    label={{ value: "Reward", angle: -90, position: "insideLeft" }}
+                  />
+                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <Line
+                    type="monotone"
+                    dataKey="reward"
+                    stroke="hsl(var(--primary))"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="epsilon"
+                    stroke="hsl(var(--chart-2))"
+                    strokeWidth={2}
+                    dot={false}
+                    strokeDasharray="5 5"
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </ChartContainer>
           </CardContent>
         </Card>
       )}
