@@ -10,6 +10,7 @@ import { useStartAutonomousTraining, useRLMetrics, useQState } from "@/lib/api/a
 import { useAlpacaAccount } from "@/lib/api/alpaca";
 import { useGenerateTrainingData } from "@/lib/api/data-generation";
 import { useLocalGPUTrainingStatus } from "@/lib/api/training";
+import { supabase } from "@/integrations/supabase/client";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { toast } from "sonner";
@@ -21,6 +22,7 @@ export default function Training() {
   const [isAutoGenerating, setIsAutoGenerating] = useState(false);
   const [autoGenIntervalId, setAutoGenIntervalId] = useState<number | null>(null);
   const [useRealData, setUseRealData] = useState(false);
+  const [isSystemActive, setIsSystemActive] = useState(false);
   
   const startTraining = useStartAutonomousTraining();
   const generateData = useGenerateTrainingData();
@@ -28,6 +30,22 @@ export default function Training() {
   const { data: qState } = useQState();
   const { data: alpacaAccount, isLoading: alpacaLoading, error: alpacaError } = useAlpacaAccount();
   const { data: localGPUStatus } = useLocalGPUTrainingStatus();
+
+  // Check system status on mount
+  useEffect(() => {
+    const checkSystemStatus = async () => {
+      const { data } = await supabase
+        .from("bot_config")
+        .select("is_active")
+        .single();
+      
+      if (data?.is_active) {
+        setIsSystemActive(true);
+      }
+    };
+    
+    checkSystemStatus();
+  }, []);
 
   const handleStartTraining = () => {
     startTraining.mutate(iterations);
@@ -108,6 +126,44 @@ export default function Training() {
       }
     };
   }, [autoIntervalId, autoGenIntervalId]);
+
+  // Toggle master system (backend continuous training)
+  const handleToggleMasterSystem = async () => {
+    const newState = !isSystemActive;
+    
+    if (newState) {
+      // Start the backend training loop
+      toast.loading("🚀 Starting autonomous training system...");
+      
+      const { error } = await supabase.functions.invoke("autonomous-training-loop", {
+        body: { action: "start" }
+      });
+      
+      if (error) {
+        toast.error("Failed to start training system");
+        console.error(error);
+        return;
+      }
+      
+      // Enable in bot_config
+      await supabase
+        .from("bot_config")
+        .update({ is_active: true })
+        .eq("id", "00000000-0000-0000-0000-000000000000");
+      
+      toast.success("🎯 Autonomous training system activated! It will continue running even if you leave this page.");
+      setIsSystemActive(true);
+    } else {
+      // Disable in bot_config (the loop will stop itself)
+      await supabase
+        .from("bot_config")
+        .update({ is_active: false })
+        .eq("id", "00000000-0000-0000-0000-000000000000");
+      
+      toast.info("🛑 Training system will stop after current iteration");
+      setIsSystemActive(false);
+    }
+  };
 
   const latestMetric = metrics?.[0];
   const totalEpisodes = qState?.episode_count || latestMetric?.total_episodes || 0;
@@ -455,42 +511,25 @@ export default function Training() {
               <div>
                 <h3 className="text-xl font-bold mb-2">Master Control</h3>
                 <p className="text-sm text-muted-foreground mb-1">
-                  {isAutoGenerating && isAutoRunning 
-                    ? "🟢 System fully autonomous - generating data & training every 30s"
-                    : isAutoGenerating 
-                    ? "🟡 Data generation active - start training to complete the loop"
-                    : isAutoRunning
-                    ? "🟡 Training active - start data generation to complete the loop"
-                    : "⚪ System idle - click Start to begin"}
+                  {isSystemActive
+                    ? "🟢 System running autonomously in backend - continues even if you leave this page"
+                    : "⚪ System stopped - click Start to begin autonomous training"}
                 </p>
-                <div className="flex gap-2 mt-2">
-                  <Badge variant={useRealData ? "default" : "secondary"} className="text-xs">
-                    {useRealData ? "Real Market Data" : "Synthetic Data"}
-                  </Badge>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setUseRealData(!useRealData)}
-                    className="h-6 px-2 text-xs"
-                  >
-                    Switch
-                  </Button>
-                </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  Backend loop: Data generation → Training → 30s wait → Repeat
+                </p>
               </div>
               <div className="flex flex-col gap-2">
                 <Button
-                  onClick={() => {
-                    if (!isAutoGenerating) handleToggleAutoGeneration();
-                    if (!isAutoRunning) handleToggleAutoTraining();
-                  }}
-                  disabled={(isAutoGenerating && isAutoRunning) || generateData.isPending || startTraining.isPending}
+                  onClick={handleToggleMasterSystem}
                   size="lg"
                   className="min-w-[140px]"
+                  variant={isSystemActive ? "destructive" : "default"}
                 >
-                  {(isAutoGenerating && isAutoRunning) ? (
+                  {isSystemActive ? (
                     <>
-                      <Activity className="mr-2 h-5 w-5 animate-pulse" />
-                      Running
+                      <Pause className="mr-2 h-5 w-5" />
+                      Stop System
                     </>
                   ) : (
                     <>
@@ -499,20 +538,6 @@ export default function Training() {
                     </>
                   )}
                 </Button>
-                {(isAutoGenerating || isAutoRunning) && (
-                  <Button
-                    onClick={() => {
-                      if (isAutoGenerating) handleToggleAutoGeneration();
-                      if (isAutoRunning) handleToggleAutoTraining();
-                    }}
-                    variant="destructive"
-                    size="lg"
-                    className="min-w-[140px]"
-                  >
-                    <Pause className="mr-2 h-5 w-5" />
-                    Stop All
-                  </Button>
-                )}
               </div>
             </div>
           </div>
