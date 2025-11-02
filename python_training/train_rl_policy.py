@@ -21,6 +21,10 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 import gymnasium as gym
 from gymnasium import spaces
+from dotenv import load_dotenv
+
+# Load environment variables from keys.env
+load_dotenv('keys.env')
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
