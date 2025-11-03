@@ -1,12 +1,10 @@
 # Distributed RL Training Requirements
 # Install with: pip install -r requirements_distributed.txt
 
-# Core PyTorch with CUDA support
-torch>=2.0.0
-torchvision>=0.15.0
-
-# Distributed training
-torch-distributed
+# Core PyTorch with CUDA support (already in requirements.txt)
+# torch>=2.0.0
+# torchvision>=0.15.0
+# Note: torch.distributed is built into PyTorch - no separate package needed
 
 # RL libraries
 stable-baselines3>=2.0.0
