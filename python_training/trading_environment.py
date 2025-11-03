@@ -26,7 +26,7 @@ class TradingEnvironment:
         supabase_url: Optional[str] = None,
         supabase_key: Optional[str] = None,
         symbols: List[str] = None,
-        timeframe: str = "5Min",
+        timeframe: str = "5m",  # Match database format
         max_steps: int = 512,
         initial_balance: float = 100000.0
     ):
@@ -41,7 +41,7 @@ class TradingEnvironment:
         
         # Environment parameters
         self.symbols = symbols or ["AAPL", "MSFT", "GOOGL", "TSLA"]
-        self.timeframe = timeframe
+        self.timeframe = timeframe if timeframe else "5m"  # Match database format
         self.max_steps = max_steps
         self.initial_balance = initial_balance
         
