@@ -14,6 +14,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { toast } from "sonner";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Skeleton } from "@/components/ui/skeleton";
 
 export default function Training() {
   const [iterations, setIterations] = useState(10);
@@ -522,70 +524,152 @@ export default function Training() {
         </Card>
       </div>
 
-      {/* GPU Training Runs */}
+      {/* Active Training Progress */}
       {gpuRuns && gpuRuns.length > 0 && (
         <Card className="border-purple-500/30 bg-purple-500/5">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Cpu className="h-5 w-5 text-purple-500" />
-              GPU Training Runs
-            </CardTitle>
-            <CardDescription>
-              Active and recent training runs from external GPU workers
-            </CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <Cpu className="h-5 w-5 text-purple-500 animate-pulse" />
+                  Training Progress
+                </CardTitle>
+                <CardDescription>
+                  Real-time status of all training runs
+                </CardDescription>
+              </div>
+              <Badge variant="default" className="animate-pulse">
+                {gpuRuns.filter(r => r.status === 'running').length} Active
+              </Badge>
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="space-y-3">
-              {gpuRuns.map((run) => {
+            <div className="space-y-4">
+              {/* Active Runs First */}
+              {gpuRuns.filter(r => r.status === 'running').map((run) => {
                 const runMetrics = gpuMetrics?.filter(m => m.run_id === run.id) || [];
                 const latestMetric = runMetrics[0];
+                const progress = run.total_epochs ? (latestMetric?.epoch || 0) / run.total_epochs * 100 : 0;
+                const timeElapsed = run.started_at ? Math.floor((Date.now() - new Date(run.started_at).getTime()) / 1000) : 0;
+                const minutesElapsed = Math.floor(timeElapsed / 60);
+                const secondsElapsed = timeElapsed % 60;
                 
                 return (
-                  <div key={run.id} className="rounded-lg border border-border bg-card p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <Badge variant={run.status === 'running' ? 'default' : run.status === 'completed' ? 'secondary' : 'destructive'}>
-                          {run.status}
-                        </Badge>
-                        <span className="font-mono text-sm">{run.run_name}</span>
-                      </div>
-                      <span className="text-xs text-muted-foreground">
-                        {run.phase}
-                      </span>
-                    </div>
-                    
-                    {latestMetric && (
-                      <div className="grid grid-cols-4 gap-4 mt-3 text-sm">
+                  <div key={run.id} className="rounded-lg border-2 border-primary/50 bg-gradient-to-br from-primary/10 to-transparent p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-3">
+                        <Activity className="h-5 w-5 text-primary animate-pulse" />
                         <div>
-                          <div className="text-muted-foreground text-xs">Epoch</div>
-                          <div className="font-bold">{latestMetric.epoch}/{run.total_epochs || '?'}</div>
-                        </div>
-                        <div>
-                          <div className="text-muted-foreground text-xs">Mean Reward</div>
-                          <div className={`font-bold ${Number(latestMetric.mean_reward) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                            {Number(latestMetric.mean_reward).toFixed(3)}
+                          <div className="font-mono font-bold">{run.run_name}</div>
+                          <div className="text-xs text-muted-foreground">
+                            Running for {minutesElapsed}m {secondsElapsed}s
                           </div>
                         </div>
-                        <div>
-                          <div className="text-muted-foreground text-xs">Win Rate</div>
-                          <div className="font-bold">{latestMetric.win_rate ? `${Number(latestMetric.win_rate).toFixed(1)}%` : '—'}</div>
+                      </div>
+                      <Badge variant="default" className="animate-pulse">
+                        {run.phase}
+                      </Badge>
+                    </div>
+                    
+                    {latestMetric ? (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-muted-foreground">Progress</span>
+                          <span className="font-bold">
+                            {latestMetric.epoch}/{run.total_epochs || '?'} epochs ({progress.toFixed(1)}%)
+                          </span>
                         </div>
-                        <div>
-                          <div className="text-muted-foreground text-xs">Sharpe</div>
-                          <div className="font-bold">{latestMetric.sharpe_ratio ? Number(latestMetric.sharpe_ratio).toFixed(2) : '—'}</div>
+                        <Progress value={progress} className="h-2" />
+                        
+                        <div className="grid grid-cols-5 gap-3 pt-2 border-t border-border/50">
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Reward</div>
+                            <div className={`font-bold ${Number(latestMetric.mean_reward) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                              {Number(latestMetric.mean_reward).toFixed(3)}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Win Rate</div>
+                            <div className="font-bold">
+                              {latestMetric.win_rate ? `${Number(latestMetric.win_rate).toFixed(1)}%` : '—'}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Sharpe</div>
+                            <div className="font-bold">
+                              {latestMetric.sharpe_ratio ? Number(latestMetric.sharpe_ratio).toFixed(2) : '—'}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Loss</div>
+                            <div className="font-bold text-blue-600">
+                              {latestMetric.policy_loss ? Number(latestMetric.policy_loss).toFixed(4) : '—'}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground mb-1">Updated</div>
+                            <div className="text-xs font-mono">
+                              {new Date(latestMetric.created_at).toLocaleTimeString()}
+                            </div>
+                          </div>
                         </div>
                       </div>
-                    )}
-                    
-                    {run.status === 'running' && latestMetric && run.total_epochs && (
-                      <Progress 
-                        value={(latestMetric.epoch / run.total_epochs) * 100} 
-                        className="mt-3" 
-                      />
+                    ) : (
+                      <div className="space-y-2">
+                        <Skeleton className="h-4 w-full" />
+                        <Skeleton className="h-8 w-full" />
+                      </div>
                     )}
                   </div>
                 );
               })}
+              
+              {/* Completed Runs */}
+              {gpuRuns.filter(r => r.status === 'completed').length > 0 && (
+                <details className="rounded-lg border border-border">
+                  <summary className="cursor-pointer p-3 font-semibold hover:bg-muted/50 flex items-center justify-between">
+                    <span>Completed Runs ({gpuRuns.filter(r => r.status === 'completed').length})</span>
+                    <RefreshCw className="h-4 w-4" />
+                  </summary>
+                  <div className="p-3 pt-0 space-y-2 border-t">
+                    {gpuRuns.filter(r => r.status === 'completed').map((run) => {
+                      const runMetrics = gpuMetrics?.filter(m => m.run_id === run.id) || [];
+                      const latestMetric = runMetrics[0];
+                      
+                      return (
+                        <div key={run.id} className="rounded-lg border border-border bg-muted/20 p-3">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-mono text-sm">{run.run_name}</span>
+                            <Badge variant="secondary">Completed</Badge>
+                          </div>
+                          {latestMetric && (
+                            <div className="grid grid-cols-4 gap-3 text-xs">
+                              <div>
+                                <div className="text-muted-foreground">Epochs</div>
+                                <div className="font-bold">{latestMetric.epoch}</div>
+                              </div>
+                              <div>
+                                <div className="text-muted-foreground">Final Reward</div>
+                                <div className={`font-bold ${Number(latestMetric.mean_reward) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                  {Number(latestMetric.mean_reward).toFixed(3)}
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-muted-foreground">Win Rate</div>
+                                <div className="font-bold">{latestMetric.win_rate ? `${Number(latestMetric.win_rate).toFixed(1)}%` : '—'}</div>
+                              </div>
+                              <div>
+                                <div className="text-muted-foreground">Completed</div>
+                                <div className="font-mono">{new Date(run.completed_at || run.started_at).toLocaleTimeString()}</div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </details>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -1045,47 +1129,130 @@ export default function Training() {
         </Card>
       )}
 
+      {/* Detailed Training Metrics Table */}
+      {gpuMetrics && gpuMetrics.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Activity className="h-5 w-5" />
+              Training Metrics History
+            </CardTitle>
+            <CardDescription>
+              Detailed view of all training sessions with real-time updates
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="rounded-md border overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[180px]">Timestamp</TableHead>
+                    <TableHead>Run</TableHead>
+                    <TableHead className="text-right">Epoch</TableHead>
+                    <TableHead className="text-right">Reward</TableHead>
+                    <TableHead className="text-right">Win Rate</TableHead>
+                    <TableHead className="text-right">Sharpe</TableHead>
+                    <TableHead className="text-right">Policy Loss</TableHead>
+                    <TableHead className="text-right">Value Loss</TableHead>
+                    <TableHead className="text-right">Entropy</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {gpuMetrics.slice(0, 20).map((metric) => {
+                    const run = gpuRuns?.find(r => r.id === metric.run_id);
+                    const isRecent = Date.now() - new Date(metric.created_at).getTime() < 60000; // Last minute
+                    
+                    return (
+                      <TableRow key={metric.id} className={isRecent ? "bg-primary/5" : ""}>
+                        <TableCell className="font-mono text-xs">
+                          {new Date(metric.created_at).toLocaleString()}
+                          {isRecent && (
+                            <Badge variant="default" className="ml-2 text-xs animate-pulse">Live</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">
+                          {run?.run_name || 'Unknown'}
+                        </TableCell>
+                        <TableCell className="text-right font-mono">
+                          {metric.epoch}
+                        </TableCell>
+                        <TableCell className={`text-right font-bold ${Number(metric.mean_reward) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          {Number(metric.mean_reward).toFixed(3)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {metric.win_rate ? `${Number(metric.win_rate).toFixed(1)}%` : '—'}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {metric.sharpe_ratio ? Number(metric.sharpe_ratio).toFixed(2) : '—'}
+                        </TableCell>
+                        <TableCell className="text-right text-blue-600 font-mono text-xs">
+                          {metric.policy_loss ? Number(metric.policy_loss).toFixed(4) : '—'}
+                        </TableCell>
+                        <TableCell className="text-right text-purple-600 font-mono text-xs">
+                          {metric.value_loss ? Number(metric.value_loss).toFixed(4) : '—'}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs">
+                          {metric.entropy ? Number(metric.entropy).toFixed(3) : '—'}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Recent Training Runs */}
       <Card>
         <CardHeader>
-          <CardTitle>Recent Training Sessions</CardTitle>
-          <CardDescription>Latest autonomous training episodes</CardDescription>
+          <CardTitle>Recent Q-Learning Sessions</CardTitle>
+          <CardDescription>Cloud-based Q-learning training history</CardDescription>
         </CardHeader>
         <CardContent>
           {metrics && metrics.length > 0 ? (
             <div className="space-y-2">
-              {metrics.slice(0, 10).map((metric) => (
-                <div
-                  key={metric.id}
-                  className="flex items-center justify-between rounded-lg border border-border bg-muted/50 p-3"
-                >
-                  <div>
-                    <div className="text-sm font-medium">
-                      {metric.episodes} episodes
+              {metrics.slice(0, 10).map((metric) => {
+                const isRecent = Date.now() - new Date(metric.created_at).getTime() < 60000;
+                return (
+                  <div
+                    key={metric.id}
+                    className={`flex items-center justify-between rounded-lg border border-border p-3 ${isRecent ? 'bg-primary/5 border-primary/30' : 'bg-muted/50'}`}
+                  >
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <div className="text-sm font-medium">
+                          {metric.episodes} episodes
+                        </div>
+                        {isRecent && (
+                          <Badge variant="default" className="text-xs animate-pulse">Live</Badge>
+                        )}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {new Date(metric.created_at).toLocaleString()}
+                      </div>
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      {new Date(metric.created_at).toLocaleString()}
+                    <div className="text-right">
+                      <div className="text-sm font-semibold">
+                        Reward: {Number(metric.avg_reward).toFixed(2)}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        L_total={Number(metric.l_total || 0).toFixed(4)} | ε={Number(metric.epsilon).toFixed(3)}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        α_imit={Number(metric.alpha_mix || 0).toFixed(2)} | {metric.q_table_size} states
+                      </div>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="text-sm font-semibold">
-                      Reward: {Number(metric.avg_reward).toFixed(2)}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      L_total={Number(metric.l_total || 0).toFixed(4)} | ε={Number(metric.epsilon).toFixed(3)}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      α_imit={Number(metric.alpha_mix || 0).toFixed(2)} | {metric.q_table_size} states
-                    </div>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className="py-8 text-center text-muted-foreground">
               <Brain className="h-12 w-12 mx-auto mb-3 opacity-50" />
-              <p>No training sessions yet</p>
-              <p className="text-sm mt-1">Start training to see results here</p>
+              <p>No Q-learning sessions yet</p>
+              <p className="text-sm mt-1">Start cloud training to see results here</p>
             </div>
           )}
         </CardContent>
