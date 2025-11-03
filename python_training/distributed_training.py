@@ -22,7 +22,7 @@ class DistributedTrainer:
         world_size: int = 8,
         backend: str = "nccl",
         use_bf16: bool = True,
-        envs_per_gpu: int = 1000
+        envs_per_gpu: int = 10  # Start small for stability
     ):
         self.world_size = world_size
         self.backend = backend
@@ -64,35 +64,36 @@ class DistributedTrainer:
         data_queue=None
     ):
         """Training worker for each GPU"""
-        print(f"🚀 Starting worker on GPU {rank}/{world_size}")
-        print(f"[GPU {rank}] Setting up distributed process group...")
-        self.setup(rank, world_size)
-        print(f"[GPU {rank}] Process group initialized!")
-        
-        # Create model on this GPU
-        print(f"[GPU {rank}] Creating model...")
         try:
-            model = model_class(config).to(rank)
-        except TypeError:
-            # Fallback if model_class doesn't accept config
-            model = model_class(
-                state_dim=config.get('state_dim', 50),
-                action_dim=config.get('action_dim', 3)
-            ).to(rank)
-        print(f"[GPU {rank}] Model created and moved to GPU!")
-        
-        if self.use_bf16:
-            model = model.to(torch.bfloat16)
-        
-        # Wrap with DDP
-        ddp_model = DDP(model, device_ids=[rank])
-        
-        # Create optimizer
-        optimizer = torch.optim.AdamW(
-            ddp_model.parameters(),
-            lr=config.get("learning_rate", 3e-4),
-            weight_decay=config.get("weight_decay", 1e-5)
-        )
+            print(f"🚀 Starting worker on GPU {rank}/{world_size}")
+            print(f"[GPU {rank}] Setting up distributed process group...")
+            self.setup(rank, world_size)
+            print(f"[GPU {rank}] Process group initialized!")
+            
+            # Create model on this GPU
+            print(f"[GPU {rank}] Creating model...")
+            try:
+                model = model_class(config).to(rank)
+            except TypeError:
+                # Fallback if model_class doesn't accept config
+                model = model_class(
+                    state_dim=config.get('state_dim', 50),
+                    action_dim=config.get('action_dim', 3)
+                ).to(rank)
+            print(f"[GPU {rank}] Model created and moved to GPU!")
+            
+            if self.use_bf16:
+                model = model.to(torch.bfloat16)
+            
+            # Wrap with DDP
+            ddp_model = DDP(model, device_ids=[rank])
+            
+            # Create optimizer
+            optimizer = torch.optim.AdamW(
+                ddp_model.parameters(),
+                lr=config.get("learning_rate", 3e-4),
+                weight_decay=config.get("weight_decay", 1e-5)
+            )
         
         # Training loop for this worker
         print(f"[GPU {rank}] Starting training loop for {config.get('epochs', 10)} epochs...")
@@ -122,7 +123,7 @@ class DistributedTrainer:
             # Log from rank 0
             if rank == 0:
                 print(f"Epoch {epoch}: Loss={metrics['loss']:.4f}, "
-                      f"Reward={metrics['mean_reward']:.2f}")
+                        f"Reward={metrics['mean_reward']:.2f}")
                 if data_queue:
                     data_queue.put({
                         'epoch': epoch,
@@ -130,7 +131,12 @@ class DistributedTrainer:
                         'metrics': metrics
                     })
         
-        self.cleanup()
+        except Exception as e:
+            print(f"❌ Worker {rank} error: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.cleanup()
         
     def _collect_rollouts(
         self,
