@@ -166,10 +166,10 @@ class DistributedTrainer:
                     
                     rollouts['states'].append(states[i])
                     rollouts['actions'].append(action.cpu().float().numpy())
-                    rollouts['rewards'].append(reward)
-                    rollouts['dones'].append(done)
-                    rollouts['values'].append(values[i].cpu().float().numpy())
-                    rollouts['log_probs'].append(log_probs[i].cpu().float().numpy())  # Store log probs
+                    rollouts['rewards'].append(float(reward))  # Ensure scalar
+                    rollouts['dones'].append(float(done))  # Ensure scalar
+                    rollouts['values'].append(values[i].cpu().float().item())  # Use .item() for scalar
+                    rollouts['log_probs'].append(log_probs[i].cpu().float().item())  # Use .item() for scalar
                     
                     if done:
                         next_state = env.reset()
@@ -189,12 +189,22 @@ class DistributedTrainer:
         """Train model on collected rollouts"""
         model.train()
         
+        # Check if rollouts are empty
+        if not rollouts['states'] or len(rollouts['states']) == 0:
+            print("⚠️  Warning: Empty rollouts, skipping training epoch")
+            return {
+                'loss': 0.0,
+                'mean_reward': 0.0,
+                'std_reward': 0.0
+            }
+        
         # Convert rollouts to tensors
         # Get device from model (handle DDP wrapping)
         device = next(model.parameters()).device
         
-        states = torch.FloatTensor(rollouts['states']).to(device)
-        actions = torch.FloatTensor(rollouts['actions']).to(device)
+        # Convert lists to numpy arrays first, then to tensors for efficiency
+        states = torch.FloatTensor(np.array(rollouts['states'])).to(device)
+        actions = torch.FloatTensor(np.array(rollouts['actions'])).to(device)
         rewards = torch.FloatTensor(rollouts['rewards']).to(device)
         values = torch.FloatTensor(rollouts['values']).to(device)
         old_log_probs = torch.FloatTensor(rollouts['log_probs']).to(device)
