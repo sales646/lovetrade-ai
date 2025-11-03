@@ -3,6 +3,10 @@ Minimal Test - Quick sanity check before distributed training
 """
 import torch
 import numpy as np
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 print("="*70)
 print("MINIMAL SYSTEM TEST")
