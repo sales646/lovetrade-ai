@@ -72,8 +72,38 @@ class TradingEnvironment:
         print(f"   Lookback: {self.lookback_days} days")
         
         try:
+            # First, check if we have enough data
+            count_response = self.supabase.table("historical_bars") \
+                .select("*", count='exact') \
+                .eq("timeframe", self.timeframe) \
+                .in_("symbol", self.symbols) \
+                .execute()
+            
+            current_count = count_response.count or 0
+            print(f"   Current bars in database: {current_count:,}")
+            
+            # If we have less than 100k bars, populate from Yahoo Finance
+            if current_count < 100000:
+                print(f"⚠️  Insufficient data ({current_count:,} bars). Fetching from Yahoo Finance...")
+                try:
+                    import requests
+                    populate_response = requests.post(
+                        f"{self.supabase_url}/functions/v1/populate-historical-data",
+                        headers={
+                            "Authorization": f"Bearer {self.supabase_key}",
+                            "Content-Type": "application/json"
+                        },
+                        timeout=300
+                    )
+                    if populate_response.ok:
+                        result = populate_response.json()
+                        print(f"✅ Populated {result.get('total_bars_inserted', 0):,} bars from Yahoo Finance")
+                    else:
+                        print(f"⚠️  Failed to populate data: {populate_response.status_code}")
+                except Exception as e:
+                    print(f"⚠️  Could not auto-populate data: {e}")
+            
             # Load historical bars for all symbols
-            # Using limit of 50000 per symbol to get lots of data
             all_bars = []
             
             for symbol in self.symbols:
@@ -83,7 +113,7 @@ class TradingEnvironment:
                     .eq("symbol", symbol) \
                     .eq("timeframe", self.timeframe) \
                     .order("timestamp", desc=False) \
-                    .limit(50000) \
+                    .limit(500000) \
                     .execute()
                 
                 if response.data:
