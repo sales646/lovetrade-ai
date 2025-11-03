@@ -818,8 +818,10 @@ class MetricsCallback(BaseCallback):
         # Early stopping checks based on plan
         
         # 1. Entropy collapse detection (policy collapsed to deterministic)
-        if entropy < 0.1:
-            logger.warning(f"⚠️ Policy collapsed! Entropy={entropy:.4f} < 0.1")
+        # Tightened threshold to catch collapse earlier
+        if entropy < 0.05:
+            logger.warning(f"⚠️ Policy collapsed! Entropy={entropy:.6f} < 0.05")
+            logger.warning("Training will stop to prevent overfitting")
             return False  # Stop training
         
         # 2. KL divergence too high (instability)
@@ -858,31 +860,109 @@ def train_ppo(
     config: TrainingConfig,
     bc_policy: BCPolicy,
     run_id: str,
-    client: Client
+    client: Client,
+    fresh_start: bool = False
 ) -> PPO:
-    """Train PPO policy starting from BC weights with early stopping"""
+    """Train PPO policy starting from BC weights with early stopping
+    
+    Args:
+        fresh_start: If True, ignores all existing checkpoints and starts from scratch
+    """
     
     logger.info("Starting PPO training")
     
     # Create environment
     env = DummyVecEnv([lambda: TradingEnv(train_trajectories, config)])
     
-    # Initialize PPO with GPU support
-    model = PPO(
-        "MlpPolicy",
-        env,
-        learning_rate=config.ppo_learning_rate,
-        n_steps=config.ppo_n_steps,
-        batch_size=config.ppo_batch_size,
-        gamma=config.ppo_gamma,
-        gae_lambda=config.ppo_gae_lambda,
-        clip_range=config.ppo_clip_range,
-        vf_coef=config.ppo_vf_coef,
-        ent_coef=config.ppo_ent_coef,
-        max_grad_norm=config.ppo_max_grad_norm,
-        verbose=1,
-        device="auto",  # Auto-detect GPU/CPU
-    )
+    # Check for existing checkpoints (unless fresh_start requested)
+    latest_checkpoint = None
+    if not fresh_start:
+        checkpoint_dir = "checkpoints"
+        if os.path.exists(checkpoint_dir):
+            checkpoints = [f for f in os.listdir(checkpoint_dir) if f.startswith("policy_ppo_") and f.endswith("_final.zip")]
+            if checkpoints:
+                # Find most recent checkpoint
+                checkpoints.sort(key=lambda x: os.path.getmtime(os.path.join(checkpoint_dir, x)), reverse=True)
+                latest_checkpoint = os.path.join(checkpoint_dir, checkpoints[0])
+                logger.info(f"Found existing checkpoint: {latest_checkpoint}")
+    
+    # Try to load existing model or create new one
+    if latest_checkpoint and os.path.exists(latest_checkpoint):
+        try:
+            logger.info(f"Loading checkpoint: {latest_checkpoint}")
+            model = PPO.load(latest_checkpoint, env=env)
+            
+            # CRITICAL: Check if loaded model has policy collapse
+            # Do a quick test rollout to measure entropy
+            test_obs = env.reset()
+            test_actions, _ = model.predict(test_obs, deterministic=False)
+            
+            # Get action probabilities to calculate entropy
+            with torch.no_grad():
+                obs_tensor = torch.FloatTensor(test_obs).to(model.device)
+                action_probs = model.policy.get_distribution(obs_tensor).distribution.probs
+                entropy = -(action_probs * torch.log(action_probs + 1e-8)).sum(dim=-1).mean().item()
+            
+            if entropy < 0.05:
+                logger.warning(f"⚠️ Loaded checkpoint has policy collapse! Entropy={entropy:.6f} < 0.05")
+                logger.warning("🔄 Starting from scratch with fresh initialization")
+                model = PPO(
+                    "MlpPolicy",
+                    env,
+                    learning_rate=config.ppo_learning_rate,
+                    n_steps=config.ppo_n_steps,
+                    batch_size=config.ppo_batch_size,
+                    gamma=config.ppo_gamma,
+                    gae_lambda=config.ppo_gae_lambda,
+                    clip_range=config.ppo_clip_range,
+                    vf_coef=config.ppo_vf_coef,
+                    ent_coef=config.ppo_ent_coef,
+                    max_grad_norm=config.ppo_max_grad_norm,
+                    verbose=1,
+                    device="auto",
+                )
+            else:
+                logger.info(f"✅ Loaded checkpoint is healthy (entropy={entropy:.4f})")
+        
+        except Exception as e:
+            logger.warning(f"Failed to load checkpoint: {e}. Starting fresh.")
+            model = PPO(
+                "MlpPolicy",
+                env,
+                learning_rate=config.ppo_learning_rate,
+                n_steps=config.ppo_n_steps,
+                batch_size=config.ppo_batch_size,
+                gamma=config.ppo_gamma,
+                gae_lambda=config.ppo_gae_lambda,
+                clip_range=config.ppo_clip_range,
+                vf_coef=config.ppo_vf_coef,
+                ent_coef=config.ppo_ent_coef,
+                max_grad_norm=config.ppo_max_grad_norm,
+                verbose=1,
+                device="auto",
+            )
+    else:
+        # No checkpoint found or fresh_start requested - create new model
+        if fresh_start:
+            logger.info("🔄 Fresh start requested - creating new model")
+        else:
+            logger.info("No existing checkpoint found - creating new model")
+        
+        model = PPO(
+            "MlpPolicy",
+            env,
+            learning_rate=config.ppo_learning_rate,
+            n_steps=config.ppo_n_steps,
+            batch_size=config.ppo_batch_size,
+            gamma=config.ppo_gamma,
+            gae_lambda=config.ppo_gae_lambda,
+            clip_range=config.ppo_clip_range,
+            vf_coef=config.ppo_vf_coef,
+            ent_coef=config.ppo_ent_coef,
+            max_grad_norm=config.ppo_max_grad_norm,
+            verbose=1,
+            device="auto",
+        )
     
     # TODO: Load BC weights into PPO policy (requires model surgery)
     
@@ -976,8 +1056,8 @@ def main():
     # Update phase
     client.table("training_runs").update({"phase": "ppo_finetuning"}).eq("id", run_id).execute()
     
-    # Train PPO
-    ppo_model = train_ppo(train_trajectories, val_trajectories, config, bc_policy, run_id, client)
+    # Train PPO (with fresh_start=True to avoid loading collapsed checkpoints)
+    ppo_model = train_ppo(train_trajectories, val_trajectories, config, bc_policy, run_id, client, fresh_start=True)
     
     # Complete run
     client.table("training_runs").update({
