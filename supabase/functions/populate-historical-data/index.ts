@@ -19,21 +19,24 @@ Deno.serve(async (req) => {
     return new Response(null, { headers: corsHeaders })
   }
 
-  try {
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
-    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    const supabase = createClient(supabaseUrl, supabaseKey)
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')!
+  const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  const supabase = createClient(supabaseUrl, supabaseKey)
 
-    // Symbols to fetch data for
-    const symbols = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN', 'META', 'JPM', 'BAC', 'WMT']
-    const timeframes = ['1m', '5m', '1h', '1d']
-    
-    console.log('🚀 Starting bulk historical data fetch from Yahoo Finance...')
-    console.log(`📊 Symbols: ${symbols.join(', ')}`)
-    console.log(`⏱️  Timeframes: ${timeframes.join(', ')}`)
+  // Symbols to fetch data for
+  const symbols = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN', 'META', 'JPM', 'BAC', 'WMT']
+  const timeframes = ['1m', '5m', '1h', '1d']
+  
+  console.log('🚀 Starting bulk historical data fetch from Yahoo Finance...')
+  console.log(`📊 Symbols: ${symbols.join(', ')}`)
+  console.log(`⏱️  Timeframes: ${timeframes.join(', ')}`)
 
+  // Run the data fetch as a background task
+  const fetchTask = async () => {
     let totalBarsInserted = 0
     const results = []
+
+    try {
 
     for (const symbol of symbols) {
       for (const timeframe of timeframes) {
@@ -130,25 +133,38 @@ Deno.serve(async (req) => {
       }
     }
 
-    console.log(`\n✅ Completed! Total bars inserted: ${totalBarsInserted}`)
+      console.log(`\n✅ Completed! Total bars inserted: ${totalBarsInserted}`)
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        total_bars_inserted: totalBarsInserted,
-        results
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+      // Log final results to Supabase
+      await supabase.from('system_logs').insert({
+        source: 'populate-historical-data',
+        level: 'info',
+        message: `Completed data population: ${totalBarsInserted} bars inserted`,
+        metadata: { results }
+      })
 
-  } catch (error) {
-    console.error('❌ Fatal error:', error)
-    return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
-      { 
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      }
-    )
+    } catch (error) {
+      console.error('❌ Fatal error:', error)
+      await supabase.from('system_logs').insert({
+        source: 'populate-historical-data',
+        level: 'error',
+        message: error instanceof Error ? error.message : String(error)
+      })
+    }
   }
+
+  // Start background task (no await - let it run)
+  fetchTask().catch(error => {
+    console.error('Background task error:', error)
+  })
+
+  // Return immediate response
+  return new Response(
+    JSON.stringify({
+      success: true,
+      message: 'Data population started in background',
+      status: 'running'
+    }),
+    { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+  )
 })

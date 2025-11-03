@@ -11,6 +11,7 @@ import { Settings as SettingsIcon, Key, Shield, Database, Download, Upload, Radi
 import { useSettingsStore } from "@/store/settingsStore";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { triggerDataPopulation } from "@/lib/api/populate-data";
 
 export default function Settings() {
   const {
@@ -29,6 +30,7 @@ export default function Settings() {
   const [localKeys, setLocalKeys] = useState(apiKeys);
   const [localRisk, setLocalRisk] = useState(riskDefaults);
   const [localWsUrl, setLocalWsUrl] = useState(externalWsUrl);
+  const [isPopulatingData, setIsPopulatingData] = useState(false);
   
   // Alpaca trading credentials (stored in database)
   const [alpacaApiKey, setAlpacaApiKey] = useState("");
@@ -132,6 +134,22 @@ export default function Settings() {
     reader.readAsText(file);
   };
 
+  const handlePopulateData = async () => {
+    setIsPopulatingData(true);
+    try {
+      await triggerDataPopulation();
+      toast.success("Data population started", {
+        description: "Fetching 5 years of historical data from Yahoo Finance. This will take several minutes.",
+      });
+    } catch (error) {
+      toast.error("Failed to start data population", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      setIsPopulatingData(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -151,8 +169,9 @@ export default function Settings() {
       </div>
 
       <Tabs defaultValue="alpaca" className="space-y-6">
-        <TabsList className="grid w-full grid-cols-5">
+        <TabsList className="grid w-full grid-cols-6">
           <TabsTrigger value="alpaca">Alpaca Trading</TabsTrigger>
+          <TabsTrigger value="database">Database</TabsTrigger>
           <TabsTrigger value="api-keys">Data APIs</TabsTrigger>
           <TabsTrigger value="data-mode">Data Mode</TabsTrigger>
           <TabsTrigger value="risk">Risk</TabsTrigger>
@@ -240,6 +259,54 @@ export default function Settings() {
               <Button onClick={handleSaveAlpacaCredentials} disabled={loadingAlpaca}>
                 {loadingAlpaca ? "Saving..." : "Save Alpaca Credentials"}
               </Button>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Database Tab */}
+        <TabsContent value="database">
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <Database className="h-5 w-5 text-primary" />
+                <CardTitle>Historical Market Data</CardTitle>
+              </div>
+              <CardDescription>
+                Download historical data from Yahoo Finance for training your models
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-4">
+                <p className="text-sm text-blue-600 dark:text-blue-400">
+                  <strong>📊 Data Source:</strong> Downloads 5 years of historical bars from Yahoo Finance for multiple symbols and timeframes. This data is used to train reinforcement learning models.
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="rounded-lg border border-border bg-muted/50 p-4">
+                  <h4 className="font-semibold mb-2">What will be downloaded:</h4>
+                  <ul className="space-y-1 text-sm text-muted-foreground list-disc list-inside">
+                    <li><strong className="text-foreground">Symbols:</strong> AAPL, MSFT, GOOGL, TSLA, NVDA, AMZN, META, JPM, BAC, WMT</li>
+                    <li><strong className="text-foreground">Timeframes:</strong> 1m, 5m, 1h, 1d</li>
+                    <li><strong className="text-foreground">Period:</strong> Up to 5 years of historical data</li>
+                    <li><strong className="text-foreground">Estimated time:</strong> 3-5 minutes</li>
+                  </ul>
+                </div>
+
+                <Button 
+                  onClick={handlePopulateData} 
+                  disabled={isPopulatingData}
+                  className="w-full"
+                  size="lg"
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  {isPopulatingData ? 'Downloading Data...' : 'Download Training Data'}
+                </Button>
+
+                <p className="text-xs text-muted-foreground">
+                  Data is fetched from Yahoo Finance and stored in your database. The process runs in the background and you can continue using the app.
+                </p>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
