@@ -400,6 +400,65 @@ export type Database = {
         }
         Relationships: []
       }
+      pbt_populations: {
+        Row: {
+          age: number
+          best_performance: number
+          created_at: string
+          exploit_interval: number
+          generation: number
+          hyperparams: Json
+          id: string
+          is_best: boolean
+          mean_performance: number
+          performance: number
+          performance_variance: number | null
+          population_id: number
+          population_size: number
+          run_id: string | null
+        }
+        Insert: {
+          age?: number
+          best_performance?: number
+          created_at?: string
+          exploit_interval?: number
+          generation: number
+          hyperparams?: Json
+          id?: string
+          is_best?: boolean
+          mean_performance?: number
+          performance?: number
+          performance_variance?: number | null
+          population_id: number
+          population_size?: number
+          run_id?: string | null
+        }
+        Update: {
+          age?: number
+          best_performance?: number
+          created_at?: string
+          exploit_interval?: number
+          generation?: number
+          hyperparams?: Json
+          id?: string
+          is_best?: boolean
+          mean_performance?: number
+          performance?: number
+          performance_variance?: number | null
+          population_id?: number
+          population_size?: number
+          run_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pbt_populations_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "training_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       position_sizing: {
         Row: {
           base_size: number
@@ -1063,6 +1122,7 @@ export type Database = {
           best_checkpoint_path: string | null
           best_val_sharpe: number | null
           completed_at: string | null
+          config: Json | null
           created_at: string
           current_epoch: number | null
           hyperparams: Json
@@ -1077,6 +1137,7 @@ export type Database = {
           best_checkpoint_path?: string | null
           best_val_sharpe?: number | null
           completed_at?: string | null
+          config?: Json | null
           created_at?: string
           current_epoch?: number | null
           hyperparams: Json
@@ -1091,6 +1152,7 @@ export type Database = {
           best_checkpoint_path?: string | null
           best_val_sharpe?: number | null
           completed_at?: string | null
+          config?: Json | null
           created_at?: string
           current_epoch?: number | null
           hyperparams?: Json
