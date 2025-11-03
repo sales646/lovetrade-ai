@@ -54,7 +54,7 @@ class DistributedRLOrchestrator:
         return {
             # Distributed settings
             'world_size': 2,  # 2 H100 GPUs
-            'envs_per_gpu': 4,  # 4 per GPU (8 total)
+            'envs_per_gpu': 256,  # 256 per GPU (512 total) - maximize GPU usage
             'use_bf16': True,
             
             # PBT settings
@@ -62,19 +62,21 @@ class DistributedRLOrchestrator:
             'exploit_interval': 5,
             'pbt_enabled': True,
             
-            # Model settings
+            # Model settings - LARGER for H100 utilization
             'model_type': 'transformer',  # 'transformer', 'lightweight', 'mlp'
             'state_dim': 50,
             'action_dim': 3,  # position_size, stop_loss, take_profit
-            'd_model': 256,
-            'nhead': 8,
-            'num_layers': 4,
+            'd_model': 1024,  # 4x larger
+            'nhead': 16,  # 2x more attention heads
+            'num_layers': 8,  # 2x deeper
+            'dim_feedforward': 4096,  # 4x d_model for transformer
+            'dropout': 0.1,
             
-            # Training settings
+            # Training settings - MASSIVE batches for H100
             'total_timesteps': 50_000_000,  # 50M timesteps
             'epochs': 100,
-            'steps_per_rollout': 512,
-            'batch_size': 256,
+            'steps_per_rollout': 8192,  # 16x larger rollouts
+            'batch_size': 32768,  # 128x larger batches
             'learning_rate': 3e-4,
             'gamma': 0.99,
             'gae_lambda': 0.95,

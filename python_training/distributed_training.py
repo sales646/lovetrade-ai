@@ -22,7 +22,7 @@ class DistributedTrainer:
         world_size: int = 8,
         backend: str = "nccl",
         use_bf16: bool = True,
-        envs_per_gpu: int = 10  # Start small for stability
+        envs_per_gpu: int = 256  # High parallelism for H100
     ):
         self.world_size = world_size
         self.backend = backend
@@ -67,10 +67,18 @@ class DistributedTrainer:
     ):
         """Training worker for each GPU"""
         try:
+            # Enable TF32 for H100 performance boost
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            
             print(f"🚀 Starting worker on GPU {rank}/{world_size}")
             print(f"[GPU {rank}] Setting up distributed process group...")
             self.setup(rank, world_size)
             print(f"[GPU {rank}] Process group initialized!")
+            
+            # Set GPU and enable optimizations
+            torch.cuda.set_device(rank)
+            torch.cuda.empty_cache()  # Clear any stale memory
             
             # Create model on this GPU
             print(f"[GPU {rank}] Creating model...")
@@ -90,11 +98,12 @@ class DistributedTrainer:
             # Wrap with DDP
             ddp_model = DDP(model, device_ids=[rank])
             
-            # Create optimizer
+            # Create optimizer with fused=True for H100 optimization
             optimizer = torch.optim.AdamW(
                 ddp_model.parameters(),
                 lr=config.get("learning_rate", 3e-4),
-                weight_decay=config.get("weight_decay", 1e-5)
+                weight_decay=config.get("weight_decay", 1e-5),
+                fused=True  # H100 optimization
             )
             
             # Training loop for this worker
@@ -181,22 +190,23 @@ class DistributedTrainer:
             'log_probs': []  # Store old log probs for PPO
         }
         
-        steps_per_rollout = config.get("steps_per_rollout", 512)
+        steps_per_rollout = config.get("steps_per_rollout", 8192)  # Much larger rollouts
         
         with torch.no_grad():
             for step in range(steps_per_rollout):
-                # Batch states - convert to numpy array first for efficiency
-                state_batch = torch.FloatTensor(np.array(states)).to(rank)
+                # Batch states - keep everything on GPU for speed
+                state_batch = torch.FloatTensor(np.array(states)).to(rank, non_blocking=True)
                 if self.use_bf16:
                     state_batch = state_batch.to(torch.bfloat16)
                 
                 # Get actions from policy
                 actions, values, log_probs = model(state_batch)
                 
-                # Step environments
+                # Step environments - vectorize for efficiency
                 new_states = []
-                for i, (env, action) in enumerate(zip(envs, actions)):
-                    next_state, reward, done, info = env.step(action.cpu().float().numpy())
+                actions_cpu = actions.cpu().float().numpy()
+                for i, (env, action) in enumerate(zip(envs, actions_cpu)):
+                    next_state, reward, done, info = env.step(action)
                     
                     rollouts['states'].append(states[i])
                     rollouts['actions'].append(action.cpu().float().numpy())
@@ -254,9 +264,9 @@ class DistributedTrainer:
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
-        # Training batches
-        batch_size = config.get("batch_size", 256)
-        num_batches = len(states) // batch_size
+        # Training batches - MUCH LARGER for H100
+        batch_size = config.get("batch_size", 32768)  # 128x larger batches
+        num_batches = max(1, len(states) // batch_size)
         total_loss = 0
         
         for _ in range(config.get("ppo_epochs", 4)):
