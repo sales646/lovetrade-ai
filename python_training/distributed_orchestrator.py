@@ -330,17 +330,8 @@ class DistributedRLOrchestrator:
 
 def main():
     """Main entry point"""
-    # Parse args or use defaults
-    config = {
-        'world_size': 8,
-        'envs_per_gpu': 1000,
-        'epochs': 100,
-        'pbt_enabled': True,
-        'use_bf16': True,
-        'model_type': 'transformer'
-    }
-    
-    orchestrator = DistributedRLOrchestrator(config)
+    # Use None to get full default config
+    orchestrator = DistributedRLOrchestrator(config=None)
     orchestrator.setup()
     orchestrator.train()
 
