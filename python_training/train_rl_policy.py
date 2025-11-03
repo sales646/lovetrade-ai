@@ -174,8 +174,8 @@ class TrainingConfig:
     bc_weight_decay: float = 1e-5
     bc_early_stop_patience: int = 1000  # From plan: patience 800-1000
     
-    # PPO Training - MAXIMIZED PER PLAN (10-20M timesteps)
-    ppo_total_timesteps: int = 10_000_000  # From plan: 10-20M timesteps
+    # PPO Training - OPTIMIZED FOR FASTER ITERATION
+    ppo_total_timesteps: int = 500_000  # 500k timesteps = ~122 rollouts (~20-40 min)
     ppo_n_steps: int = 4096  # Increased from 2048 for better rollouts
     ppo_batch_size: int = 4096  # Increased from 2048 for GPU efficiency
     ppo_learning_rate: float = 2e-4  # Slightly lower for stability
