@@ -66,7 +66,7 @@ export function useGPUTrainingRuns() {
         .from("training_runs")
         .select("*")
         .order("created_at", { ascending: false })
-        .limit(10);
+        .limit(100);
 
       if (error) throw error;
       return data;
