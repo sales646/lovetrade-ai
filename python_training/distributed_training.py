@@ -94,42 +94,42 @@ class DistributedTrainer:
                 lr=config.get("learning_rate", 3e-4),
                 weight_decay=config.get("weight_decay", 1e-5)
             )
-        
-        # Training loop for this worker
-        print(f"[GPU {rank}] Starting training loop for {config.get('epochs', 10)} epochs...")
-        for epoch in range(config.get("epochs", 10)):
-            print(f"[GPU {rank}] Epoch {epoch+1}: Collecting rollouts...")
-            # Generate rollouts on this GPU
-            rollouts = self._collect_rollouts(
-                rank, 
-                ddp_model, 
-                env_fn, 
-                self.envs_per_gpu,
-                config
-            )
-            print(f"[GPU {rank}] Epoch {epoch+1}: Collected {len(rollouts['rewards'])} steps")
             
-            # Train on rollouts
-            metrics = self._train_epoch(
-                ddp_model,
-                optimizer,
-                rollouts,
-                config
-            )
-            
-            # Sync gradients across GPUs
-            dist.barrier()
-            
-            # Log from rank 0
-            if rank == 0:
-                print(f"Epoch {epoch}: Loss={metrics['loss']:.4f}, "
-                        f"Reward={metrics['mean_reward']:.2f}")
-                if data_queue:
-                    data_queue.put({
-                        'epoch': epoch,
-                        'rank': rank,
-                        'metrics': metrics
-                    })
+            # Training loop for this worker
+            print(f"[GPU {rank}] Starting training loop for {config.get('epochs', 10)} epochs...")
+            for epoch in range(config.get("epochs", 10)):
+                print(f"[GPU {rank}] Epoch {epoch+1}: Collecting rollouts...")
+                # Generate rollouts on this GPU
+                rollouts = self._collect_rollouts(
+                    rank, 
+                    ddp_model, 
+                    env_fn, 
+                    self.envs_per_gpu,
+                    config
+                )
+                print(f"[GPU {rank}] Epoch {epoch+1}: Collected {len(rollouts['rewards'])} steps")
+                
+                # Train on rollouts
+                metrics = self._train_epoch(
+                    ddp_model,
+                    optimizer,
+                    rollouts,
+                    config
+                )
+                
+                # Sync gradients across GPUs
+                dist.barrier()
+                
+                # Log from rank 0
+                if rank == 0:
+                    print(f"Epoch {epoch}: Loss={metrics['loss']:.4f}, "
+                            f"Reward={metrics['mean_reward']:.2f}")
+                    if data_queue:
+                        data_queue.put({
+                            'epoch': epoch,
+                            'rank': rank,
+                            'metrics': metrics
+                        })
         
         except Exception as e:
             print(f"❌ Worker {rank} error: {e}")
