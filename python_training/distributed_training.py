@@ -3,6 +3,7 @@ Distributed RL Training System - 8 GPUs with DDP
 Supports: 8000 parallel environments, BF16 precision, Transformer policies
 """
 import os
+import socket
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -32,9 +33,22 @@ class DistributedTrainer:
     def setup(self, rank: int, world_size: int):
         """Initialize distributed process group"""
         os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '12355'
+        
+        # Use dynamic port if not set, or find available port
+        if 'MASTER_PORT' not in os.environ:
+            os.environ['MASTER_PORT'] = str(self._find_free_port())
+        
         dist.init_process_group(self.backend, rank=rank, world_size=world_size)
         torch.cuda.set_device(rank)
+    
+    @staticmethod
+    def _find_free_port() -> int:
+        """Find a free port for distributed training"""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+        return port
         
     def cleanup(self):
         """Clean up distributed process group"""
