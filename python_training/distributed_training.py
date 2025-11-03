@@ -65,9 +65,12 @@ class DistributedTrainer:
     ):
         """Training worker for each GPU"""
         print(f"🚀 Starting worker on GPU {rank}/{world_size}")
+        print(f"[GPU {rank}] Setting up distributed process group...")
         self.setup(rank, world_size)
+        print(f"[GPU {rank}] Process group initialized!")
         
         # Create model on this GPU
+        print(f"[GPU {rank}] Creating model...")
         try:
             model = model_class(config).to(rank)
         except TypeError:
@@ -76,6 +79,7 @@ class DistributedTrainer:
                 state_dim=config.get('state_dim', 50),
                 action_dim=config.get('action_dim', 3)
             ).to(rank)
+        print(f"[GPU {rank}] Model created and moved to GPU!")
         
         if self.use_bf16:
             model = model.to(torch.bfloat16)
@@ -91,7 +95,9 @@ class DistributedTrainer:
         )
         
         # Training loop for this worker
+        print(f"[GPU {rank}] Starting training loop for {config.get('epochs', 10)} epochs...")
         for epoch in range(config.get("epochs", 10)):
+            print(f"[GPU {rank}] Epoch {epoch+1}: Collecting rollouts...")
             # Generate rollouts on this GPU
             rollouts = self._collect_rollouts(
                 rank, 
@@ -100,6 +106,7 @@ class DistributedTrainer:
                 self.envs_per_gpu,
                 config
             )
+            print(f"[GPU {rank}] Epoch {epoch+1}: Collected {len(rollouts['rewards'])} steps")
             
             # Train on rollouts
             metrics = self._train_epoch(
@@ -137,11 +144,16 @@ class DistributedTrainer:
         model.eval()
         
         # Create vectorized environments for this GPU
+        print(f"[GPU {rank}] Creating {num_envs} environments...")
         try:
             envs = [env_fn() for _ in range(num_envs)]
+            print(f"[GPU {rank}] Environments created, resetting...")
             states = [env.reset() for env in envs]
+            print(f"[GPU {rank}] Environments ready!")
         except Exception as e:
             print(f"⚠️  Warning on GPU {rank}: Could not create environments: {e}")
+            import traceback
+            traceback.print_exc()
             # Return empty rollouts
             return {
                 'states': [],
