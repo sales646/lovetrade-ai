@@ -7,11 +7,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
-import { Settings as SettingsIcon, Key, Shield, Database, Download, Upload, Radio } from "lucide-react";
+import { Settings as SettingsIcon, Key, Shield, Database, Download, Upload, Radio, RefreshCw } from "lucide-react";
 import { useSettingsStore } from "@/store/settingsStore";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
-import { triggerDataPopulation } from "@/lib/api/populate-data";
+import { triggerDataPopulation, getHistoricalBarCount } from "@/lib/api/populate-data";
 
 export default function Settings() {
   const {
@@ -31,6 +31,8 @@ export default function Settings() {
   const [localRisk, setLocalRisk] = useState(riskDefaults);
   const [localWsUrl, setLocalWsUrl] = useState(externalWsUrl);
   const [isPopulatingData, setIsPopulatingData] = useState(false);
+  const [barCount, setBarCount] = useState<number | null>(null);
+  const [isLoadingCount, setIsLoadingCount] = useState(false);
   
   // Alpaca trading credentials (stored in database)
   const [alpacaApiKey, setAlpacaApiKey] = useState("");
@@ -54,7 +56,18 @@ export default function Settings() {
     };
     
     loadAlpacaCredentials();
+    loadBarCount(); // Load bar count on mount
   }, []);
+
+  const loadBarCount = async () => {
+    setIsLoadingCount(true);
+    try {
+      const count = await getHistoricalBarCount();
+      setBarCount(count);
+    } finally {
+      setIsLoadingCount(false);
+    }
+  };
 
   const handleSaveKeys = () => {
     updateAPIKey("alpaca", localKeys.alpaca);
@@ -139,8 +152,10 @@ export default function Settings() {
     try {
       await triggerDataPopulation();
       toast.success("Data population started", {
-        description: "Fetching 5 years of historical data from Yahoo Finance. This will take several minutes.",
+        description: "Fetching historical data from Yahoo Finance. Click refresh to check progress.",
       });
+      // Reload count after a few seconds to show initial progress
+      setTimeout(loadBarCount, 5000);
     } catch (error) {
       toast.error("Failed to start data population", {
         description: error instanceof Error ? error.message : "Unknown error",
@@ -283,12 +298,35 @@ export default function Settings() {
               </div>
 
               <div className="space-y-4">
+                {/* Current Bar Count */}
+                <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="font-semibold">Current Database Status</h4>
+                      <p className="text-2xl font-bold text-primary mt-1">
+                        {barCount !== null ? barCount.toLocaleString() : '...'} bars
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Historical price bars in database
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={loadBarCount}
+                      disabled={isLoadingCount}
+                    >
+                      <RefreshCw className={`h-4 w-4 ${isLoadingCount ? 'animate-spin' : ''}`} />
+                    </Button>
+                  </div>
+                </div>
+
                 <div className="rounded-lg border border-border bg-muted/50 p-4">
                   <h4 className="font-semibold mb-2">What will be downloaded:</h4>
                   <ul className="space-y-1 text-sm text-muted-foreground list-disc list-inside">
                     <li><strong className="text-foreground">Symbols:</strong> AAPL, MSFT, GOOGL, TSLA, NVDA, AMZN, META, JPM, BAC, WMT</li>
                     <li><strong className="text-foreground">Timeframes:</strong> 1m, 5m, 1h, 1d</li>
-                    <li><strong className="text-foreground">Period:</strong> Up to 5 years of historical data</li>
+                    <li><strong className="text-foreground">Period:</strong> Up to 5 years (varies by timeframe)</li>
                     <li><strong className="text-foreground">Estimated time:</strong> 3-5 minutes</li>
                   </ul>
                 </div>
@@ -304,7 +342,7 @@ export default function Settings() {
                 </Button>
 
                 <p className="text-xs text-muted-foreground">
-                  Data is fetched from Yahoo Finance and stored in your database. The process runs in the background and you can continue using the app.
+                  Data is fetched from Yahoo Finance and stored in your database. The process runs in the background - click the refresh button above to check progress.
                 </p>
               </div>
             </CardContent>
