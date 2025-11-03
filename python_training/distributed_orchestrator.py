@@ -18,6 +18,29 @@ from advanced_rewards import ProfitOptimizedRewardShaper
 from gpu_monitor import GPUMonitor, LoadBalancer, print_gpu_summary
 
 
+# Dummy environment for testing (will be replaced with real trading env)
+class DummyTradingEnv:
+    """Placeholder trading environment for testing"""
+    def __init__(self):
+        self.state_dim = 50
+        self.action_space_dim = 3
+        
+    def reset(self):
+        return np.random.randn(self.state_dim)
+    
+    def step(self, action):
+        next_state = np.random.randn(self.state_dim)
+        reward = np.random.randn()
+        done = np.random.random() < 0.1
+        info = {}
+        return next_state, reward, done, info
+
+
+def create_dummy_env():
+    """Factory function for creating dummy environments"""
+    return DummyTradingEnv()
+
+
 class DistributedRLOrchestrator:
     """
     Master orchestrator for distributed RL training
@@ -248,25 +271,8 @@ class DistributedRLOrchestrator:
     
     def _create_env_factory(self):
         """Create environment factory function"""
-        # Create a dummy environment for now
-        class DummyTradingEnv:
-            def __init__(self):
-                self.state_dim = 50
-                self.action_space_dim = 3
-                
-            def reset(self):
-                return np.random.randn(self.state_dim)
-            
-            def step(self, action):
-                next_state = np.random.randn(self.state_dim)
-                reward = np.random.randn()
-                done = np.random.random() < 0.1
-                info = {}
-                return next_state, reward, done, info
-        
-        def env_fn():
-            return DummyTradingEnv()
-        return env_fn
+        # Return the module-level factory function (picklable)
+        return create_dummy_env
     
     def _process_metrics(self, epoch: int, metrics: list):
         """Process and log metrics"""
