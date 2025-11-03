@@ -10,6 +10,10 @@ import numpy as np
 from datetime import datetime
 from typing import Dict, Optional
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from distributed_training import DistributedTrainer, check_gpu_availability
 from pbt_scheduler import AdaptivePBTScheduler
