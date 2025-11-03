@@ -32,13 +32,15 @@ class DistributedTrainer:
         
     def setup(self, rank: int, world_size: int):
         """Initialize distributed process group"""
-        os.environ['MASTER_ADDR'] = 'localhost'
-        
-        # Use dynamic port if not set, or find available port
-        if 'MASTER_PORT' not in os.environ:
-            os.environ['MASTER_PORT'] = str(self._find_free_port())
-        
-        dist.init_process_group(self.backend, rank=rank, world_size=world_size)
+        # MASTER_ADDR and MASTER_PORT should already be set by launch()
+        import datetime
+        timeout = datetime.timedelta(minutes=10)
+        dist.init_process_group(
+            self.backend, 
+            rank=rank, 
+            world_size=world_size,
+            timeout=timeout
+        )
         torch.cuda.set_device(rank)
     
     @staticmethod
@@ -338,6 +340,13 @@ class DistributedTrainer:
         print(f"🚀 Launching distributed training on {self.world_size} GPUs")
         print(f"📊 Total environments: {self.total_envs}")
         print(f"⚡ BF16 precision: {self.use_bf16}")
+        
+        # Set master address and port ONCE before spawning workers
+        os.environ['MASTER_ADDR'] = 'localhost'
+        if 'MASTER_PORT' not in os.environ:
+            master_port = self._find_free_port()
+            os.environ['MASTER_PORT'] = str(master_port)
+            print(f"📡 Using MASTER_PORT: {master_port}")
         
         # Create queue for metrics
         ctx = mp.get_context('spawn')
