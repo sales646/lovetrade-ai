@@ -56,3 +56,6 @@ verify_jwt = false
 
 [functions.distributed-training-status]
 verify_jwt = false
+
+[functions.populate-historical-data]
+verify_jwt = false
