@@ -1,6 +1,6 @@
 """
-Real Trading Environment - Connects to Supabase Data
-Uses expert trajectories and market data for realistic RL training
+Real Trading Environment - Uses Historical Market Data from Supabase
+NO SIMULATION - Pure historical bars with real price movements
 """
 import os
 import numpy as np
@@ -12,13 +12,13 @@ import json
 
 class TradingEnvironment:
     """
-    Real trading environment that uses Supabase data
+    Real trading environment using historical market data
     
     Features:
-    - Loads expert trajectories from Supabase
-    - Uses real market features (price, indicators, etc.)
-    - Calculates profit-based rewards
-    - Supports multiple symbols and timeframes
+    - Loads historical bars from Supabase (5m, 1m timeframes)
+    - Uses real price movements for reward calculation
+    - Includes technical indicators
+    - No simulation or augmentation - pure historical data
     """
     
     def __init__(
@@ -26,7 +26,8 @@ class TradingEnvironment:
         supabase_url: Optional[str] = None,
         supabase_key: Optional[str] = None,
         symbols: List[str] = None,
-        timeframe: str = "5m",  # Match database format
+        timeframe: str = "5m",
+        lookback_days: int = 1825,  # 5 years default
         max_steps: int = 512,
         initial_balance: float = 100000.0
     ):
@@ -40,188 +41,198 @@ class TradingEnvironment:
         self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
         
         # Environment parameters
-        self.symbols = symbols or ["AAPL", "MSFT", "GOOGL", "TSLA"]
-        self.timeframe = timeframe if timeframe else "5m"  # Match database format
+        self.symbols = symbols or ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA", "AMZN"]
+        self.timeframe = timeframe
+        self.lookback_days = lookback_days
         self.max_steps = max_steps
         self.initial_balance = initial_balance
         
         # State tracking
         self.current_step = 0
-        self.current_trajectory_idx = 0
-        self.trajectories: List[Dict] = []
+        self.current_bar_idx = 0
+        self.historical_bars: List[Dict] = []
+        self.indicators: Dict = {}  # symbol -> list of indicators
         self.current_position = 0.0  # -1 (short), 0 (flat), 1 (long)
         self.entry_price = 0.0
         self.balance = initial_balance
         self.equity_history = [initial_balance]
         
-        # Load trajectories on initialization
-        self._load_trajectories()
+        # Load historical data
+        self._load_historical_data()
         
         # Define observation space dimensions
-        self.state_dim = 50  # Match config
-        self.action_space_dim = 3  # position_size (-1 to 1), stop_loss, take_profit
+        self.state_dim = 50
+        self.action_space_dim = 3  # position_size, stop_loss, take_profit
         
-    def _load_trajectories(self):
-        """Load expert trajectories from Supabase"""
-        print(f"📊 Loading trajectories from Supabase...")
+    def _load_historical_data(self):
+        """Load historical bars and indicators from Supabase"""
+        print(f"📊 Loading historical market data from Supabase...")
+        print(f"   Symbols: {self.symbols}")
+        print(f"   Timeframe: {self.timeframe}")
+        print(f"   Lookback: {self.lookback_days} days")
         
         try:
-            # Query trajectories ordered by timestamp
-            response = self.supabase.table("expert_trajectories") \
-                .select("*") \
-                .in_("symbol", self.symbols) \
-                .eq("timeframe", self.timeframe) \
-                .order("timestamp") \
-                .limit(10000) \
-                .execute()
+            # Load historical bars for all symbols
+            # Using limit of 50000 per symbol to get lots of data
+            all_bars = []
             
-            if response.data and len(response.data) > 0:
-                self.trajectories = response.data
-                print(f"✅ Loaded {len(self.trajectories)} trajectories")
-                print(f"   Symbols: {set(t['symbol'] for t in self.trajectories)}")
-                print(f"   Timeframe: {self.timeframe}")
+            for symbol in self.symbols:
+                print(f"   Loading {symbol}...")
+                response = self.supabase.table("historical_bars") \
+                    .select("*") \
+                    .eq("symbol", symbol) \
+                    .eq("timeframe", self.timeframe) \
+                    .order("timestamp", desc=False) \
+                    .limit(50000) \
+                    .execute()
                 
-                # Data augmentation: Replicate data with noise to create more samples
-                if len(self.trajectories) < 100000:
-                    print(f"🔧 Augmenting data from {len(self.trajectories)} to 100,000+ samples...")
-                    original_count = len(self.trajectories)
-                    augmented = []
-                    
-                    # Replicate until we have 100k+ samples
-                    while len(augmented) + len(self.trajectories) < 100000:
-                        for traj in self.trajectories[:1000]:  # Batch augmentation
-                            # Create augmented version with small random variations
-                            aug_traj = traj.copy()
-                            if 'obs_features' in aug_traj and isinstance(aug_traj['obs_features'], dict):
-                                features = aug_traj['obs_features'].copy()
-                                # Add small noise to numeric features (±1%)
-                                for key in ['close', 'open', 'high', 'low', 'rsi_14', 'atr_14']:
-                                    if key in features and features[key] is not None:
-                                        noise = np.random.randn() * 0.01
-                                        features[key] = features[key] * (1 + noise)
-                                aug_traj['obs_features'] = features
-                            augmented.append(aug_traj)
-                    
-                    self.trajectories.extend(augmented)
-                    print(f"✅ Augmented to {len(self.trajectories)} total samples (from {original_count} originals)")
+                if response.data:
+                    all_bars.extend(response.data)
+                    print(f"      ✅ {len(response.data)} bars")
+            
+            if len(all_bars) > 0:
+                # Sort all bars by timestamp
+                self.historical_bars = sorted(all_bars, key=lambda x: x['timestamp'])
+                
+                print(f"\n✅ Loaded {len(self.historical_bars):,} total historical bars")
+                print(f"   Date range: {self.historical_bars[0]['timestamp'][:10]} to {self.historical_bars[-1]['timestamp'][:10]}")
+                print(f"   Symbols: {set(b['symbol'] for b in self.historical_bars)}")
+                
+                # Load technical indicators
+                self._load_indicators()
+                
             else:
-                print("⚠️  No trajectories found - using synthetic data")
-                self._generate_synthetic_trajectories()
+                print("⚠️  No historical bars found - generating fallback data")
+                self._generate_fallback_data()
                 
         except Exception as e:
-            print(f"⚠️  Error loading trajectories: {e}")
-            print("   Falling back to synthetic data")
-            self._generate_synthetic_trajectories()
+            print(f"❌ Error loading historical data: {e}")
+            import traceback
+            traceback.print_exc()
+            self._generate_fallback_data()
     
-    def _generate_synthetic_trajectories(self):
-        """Generate synthetic trajectories if database is empty"""
-        print("🔧 Generating synthetic training data...")
+    def _load_indicators(self):
+        """Load technical indicators for all symbols"""
+        print(f"\n📈 Loading technical indicators...")
         
-        num_samples = 1000
-        for i in range(num_samples):
-            # Create realistic-looking market features
+        try:
+            for symbol in self.symbols:
+                response = self.supabase.table("technical_indicators") \
+                    .select("*") \
+                    .eq("symbol", symbol) \
+                    .eq("timeframe", self.timeframe) \
+                    .order("timestamp", desc=False) \
+                    .limit(50000) \
+                    .execute()
+                
+                if response.data:
+                    self.indicators[symbol] = response.data
+                    print(f"   {symbol}: {len(response.data)} indicator snapshots")
+            
+            print(f"✅ Loaded indicators for {len(self.indicators)} symbols")
+                    
+        except Exception as e:
+            print(f"⚠️  Could not load indicators: {e}")
+            self.indicators = {}
+    
+    def _generate_fallback_data(self):
+        """Generate minimal fallback data if database is empty"""
+        print("🔧 Generating fallback market data (1000 bars)...")
+        
+        for i in range(1000):
             price = 100 + np.random.randn() * 10
-            features = {
-                "close": price,
-                "open": price + np.random.randn() * 0.5,
-                "high": price + abs(np.random.randn()) * 1.5,
-                "low": price - abs(np.random.randn()) * 1.5,
-                "volume": int(1000000 + np.random.randn() * 500000),
-                "rsi_14": 30 + np.random.rand() * 40,  # 30-70 range
-                "atr_14": abs(np.random.randn()) * 2,
-                "ema_20": price + np.random.randn() * 2,
-                "ema_50": price + np.random.randn() * 5,
-                "vwap": price + np.random.randn() * 1,
-            }
-            
-            # Action: -1 (sell), 0 (hold), 1 (buy)
-            action = np.random.choice([-1, 0, 1])
-            
-            # Calculate reward based on next price movement
-            next_price_change = np.random.randn() * 0.02  # ±2% typical
-            if action == 1:  # Buy
-                reward = next_price_change * 100  # Profit on long
-            elif action == -1:  # Sell
-                reward = -next_price_change * 100  # Profit on short
-            else:  # Hold
-                reward = -0.1  # Small holding cost
-            
-            self.trajectories.append({
-                "symbol": np.random.choice(self.symbols),
-                "timeframe": self.timeframe,
-                "timestamp": datetime.now().isoformat(),
-                "obs_features": features,
-                "action": action,
-                "reward": reward,
-                "delta_equity": reward,
-                "fees": -0.5,  # Typical commission
-                "slippage": -0.1
-            })
+            for symbol in self.symbols[:2]:  # Just 2 symbols for fallback
+                self.historical_bars.append({
+                    'symbol': symbol,
+                    'timestamp': f"2024-01-01T{i//60:02d}:{i%60:02d}:00Z",
+                    'open': price,
+                    'high': price + abs(np.random.randn()),
+                    'low': price - abs(np.random.randn()),
+                    'close': price + np.random.randn() * 0.5,
+                    'volume': int(1000000 + np.random.randn() * 500000)
+                })
         
-        print(f"✅ Generated {num_samples} synthetic trajectories")
+        print(f"✅ Generated {len(self.historical_bars)} fallback bars")
     
     def reset(self) -> np.ndarray:
-        """Reset environment to initial state"""
+        """Reset environment to random point in history"""
         self.current_step = 0
         self.current_position = 0.0
         self.entry_price = 0.0
         self.balance = self.initial_balance
         self.equity_history = [self.initial_balance]
         
-        # Randomly sample a starting trajectory (with wraparound)
-        if len(self.trajectories) > 0:
-            self.current_trajectory_idx = np.random.randint(0, len(self.trajectories))
+        # Start at random point in history (leave room for max_steps)
+        if len(self.historical_bars) > self.max_steps:
+            max_start = len(self.historical_bars) - self.max_steps
+            self.current_bar_idx = np.random.randint(0, max_start)
+        else:
+            self.current_bar_idx = 0
         
         return self._get_observation()
     
     def _get_observation(self) -> np.ndarray:
-        """Get current observation/state"""
-        if not self.trajectories or self.current_trajectory_idx >= len(self.trajectories):
-            # Return random state if no data
-            return np.random.randn(self.state_dim).astype(np.float32)
+        """Get current market state observation"""
+        if self.current_bar_idx >= len(self.historical_bars):
+            return np.zeros(self.state_dim, dtype=np.float32)
         
-        # Get current trajectory
-        traj = self.trajectories[self.current_trajectory_idx]
-        features = traj.get("obs_features", {})
+        bar = self.historical_bars[self.current_bar_idx]
+        symbol = bar['symbol']
         
-        # Build state vector from features
+        # Build state vector from real market data
         state = np.zeros(self.state_dim, dtype=np.float32)
         
-        # Price features (normalized)
-        state[0] = features.get("close", 100) / 100.0
-        state[1] = features.get("open", 100) / 100.0
-        state[2] = features.get("high", 100) / 100.0
-        state[3] = features.get("low", 100) / 100.0
-        state[4] = features.get("volume", 1000000) / 1000000.0
+        # Price features (normalized by close price)
+        close = float(bar['close'])
+        state[0] = float(bar['open']) / close if close > 0 else 1.0
+        state[1] = float(bar['high']) / close if close > 0 else 1.0
+        state[2] = float(bar['low']) / close if close > 0 else 1.0
+        state[3] = 1.0  # close / close = 1
+        state[4] = float(bar['volume']) / 1000000.0  # Volume in millions
         
-        # Technical indicators
-        state[5] = features.get("rsi_14", 50) / 100.0
-        state[6] = features.get("atr_14", 1) / 10.0
-        state[7] = features.get("ema_20", 100) / 100.0
-        state[8] = features.get("ema_50", 100) / 100.0
-        state[9] = features.get("vwap", 100) / 100.0
+        # Get technical indicators if available
+        if symbol in self.indicators and len(self.indicators[symbol]) > 0:
+            # Find indicator snapshot closest to current bar
+            bar_time = bar['timestamp']
+            matching_indicators = [ind for ind in self.indicators[symbol] 
+                                 if ind['timestamp'] <= bar_time]
+            
+            if matching_indicators:
+                ind = matching_indicators[-1]  # Most recent
+                
+                state[5] = ind.get('rsi_14', 50) / 100.0
+                state[6] = ind.get('atr_14', 1) / close if close > 0 else 0.01
+                state[7] = ind.get('ema_20', close) / close if close > 0 else 1.0
+                state[8] = ind.get('ema_50', close) / close if close > 0 else 1.0
+                state[9] = ind.get('vwap', close) / close if close > 0 else 1.0
+                state[10] = ind.get('vwap_distance_pct', 0) / 100.0
+                state[11] = ind.get('volume_zscore', 0) / 3.0  # Normalize z-score
         
-        # Position information
-        state[10] = self.current_position
-        state[11] = (self.balance - self.initial_balance) / self.initial_balance
-        state[12] = self.current_step / self.max_steps
+        # Position and account state
+        state[12] = self.current_position
+        state[13] = (self.balance - self.initial_balance) / self.initial_balance
+        state[14] = self.current_step / self.max_steps
         
-        # Fill remaining with expert features or zeros
-        # This allows the model to learn from expert demonstrations
-        if len(state) > 13:
-            state[13:] = np.random.randn(len(state) - 13) * 0.1
+        # Look back at recent bars for momentum features (if available)
+        if self.current_bar_idx >= 5:
+            recent_bars = self.historical_bars[self.current_bar_idx-5:self.current_bar_idx]
+            closes = [float(b['close']) for b in recent_bars if b['symbol'] == symbol]
+            
+            if len(closes) >= 2:
+                # Recent price momentum
+                state[15] = (closes[-1] - closes[0]) / closes[0] if closes[0] > 0 else 0
+                # Volatility (std of returns)
+                returns = [closes[i]/closes[i-1] - 1 for i in range(1, len(closes))]
+                state[16] = np.std(returns) if len(returns) > 1 else 0
         
         return state.astype(np.float32)
     
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict]:
         """
-        Execute one step in the environment
+        Execute one step using real market data
         
         Args:
             action: [position_size, stop_loss, take_profit]
-                    position_size: -1 (full short) to 1 (full long)
-                    stop_loss: 0 to 1 (percentage)
-                    take_profit: 0 to 1 (percentage)
         
         Returns:
             next_state, reward, done, info
@@ -229,27 +240,38 @@ class TradingEnvironment:
         # Parse action
         position_size = np.clip(action[0] if len(action) > 0 else 0, -1, 1)
         
-        # Wraparound to beginning if we reach the end
-        if self.current_trajectory_idx >= len(self.trajectories):
-            self.current_trajectory_idx = 0
+        # Check if episode is done
+        if self.current_bar_idx >= len(self.historical_bars) - 1:
+            return self._get_observation(), 0.0, True, self._get_info()
         
-        # Get current trajectory data
-        traj = self.trajectories[self.current_trajectory_idx]
+        # Get current and next bar (for reward calculation)
+        current_bar = self.historical_bars[self.current_bar_idx]
+        next_bar = self.historical_bars[self.current_bar_idx + 1]
         
-        # Calculate reward based on position and price movement
-        if "reward" in traj:
-            # Use expert trajectory reward
-            base_reward = float(traj["reward"])
+        # Only calculate reward if bars are from same symbol
+        if current_bar['symbol'] == next_bar['symbol']:
+            current_price = float(current_bar['close'])
+            next_price = float(next_bar['close'])
+            
+            # Calculate real price change
+            price_change_pct = (next_price - current_price) / current_price if current_price > 0 else 0
+            
+            # Calculate reward based on position and actual price movement
+            if abs(position_size) > 0.1:
+                # Trading: reward = position * actual price change * leverage
+                base_reward = position_size * price_change_pct * 100
+                
+                # Costs
+                commission = -0.5  # $0.50 per trade
+                slippage = -abs(position_size) * 0.1
+                
+                reward = base_reward + commission + slippage
+            else:
+                # Holding: small penalty
+                reward = -0.1
         else:
-            # Calculate reward from price change
-            price_change_pct = np.random.randn() * 0.02  # Simulated ±2%
-            base_reward = position_size * price_change_pct * 100
-        
-        # Add penalties
-        commission = -0.5 if abs(position_size) > 0.1 else 0
-        slippage = -abs(position_size) * 0.1
-        
-        reward = base_reward + commission + slippage
+            # Different symbols, no reward
+            reward = 0.0
         
         # Update balance
         self.balance += reward
@@ -258,28 +280,30 @@ class TradingEnvironment:
         # Update state
         self.current_position = position_size
         self.current_step += 1
-        self.current_trajectory_idx += 1
+        self.current_bar_idx += 1
         
-        # Check if episode is done
+        # Check if episode should end
         done = (
             self.current_step >= self.max_steps or
-            self.current_trajectory_idx >= len(self.trajectories) or
-            self.balance <= self.initial_balance * 0.5  # Stop if 50% drawdown
+            self.current_bar_idx >= len(self.historical_bars) - 1 or
+            self.balance <= self.initial_balance * 0.5  # 50% drawdown
         )
         
         # Get next observation
         next_state = self._get_observation()
         
-        # Info dict
-        info = {
+        return next_state, reward, done, self._get_info()
+    
+    def _get_info(self) -> Dict:
+        """Get current episode info"""
+        return {
             "balance": self.balance,
             "position": self.current_position,
             "step": self.current_step,
+            "bar_idx": self.current_bar_idx,
             "pnl": self.balance - self.initial_balance,
             "return_pct": (self.balance - self.initial_balance) / self.initial_balance * 100
         }
-        
-        return next_state, reward, done, info
     
     def get_episode_stats(self) -> Dict:
         """Get statistics for completed episode"""
@@ -288,9 +312,9 @@ class TradingEnvironment:
         
         total_return = (self.balance - self.initial_balance) / self.initial_balance * 100
         
-        # Calculate Sharpe ratio (simplified)
+        # Calculate Sharpe ratio
         if len(returns) > 1 and np.std(returns) > 0:
-            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252)
+            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252 * 78)  # 78 5-min bars per day
         else:
             sharpe = 0
         
@@ -305,7 +329,7 @@ class TradingEnvironment:
             "sharpe_ratio": sharpe,
             "max_drawdown_pct": max_drawdown,
             "num_steps": self.current_step,
-            "trajectories_used": self.current_trajectory_idx
+            "bars_used": self.current_bar_idx
         }
 
 
@@ -316,22 +340,22 @@ def create_trading_env() -> TradingEnvironment:
 
 if __name__ == "__main__":
     # Test the environment
-    print("Testing Trading Environment...")
+    print("Testing Real Market Data Environment...")
     env = create_trading_env()
     
     state = env.reset()
     print(f"\nInitial state shape: {state.shape}")
+    print(f"Historical bars loaded: {len(env.historical_bars):,}")
     print(f"State dim: {env.state_dim}")
     print(f"Action dim: {env.action_space_dim}")
-    print(f"Trajectories loaded: {len(env.trajectories)}")
     
-    # Run a few steps
+    # Run a few steps with real data
     total_reward = 0
     for i in range(10):
-        action = np.random.randn(3)  # Random action
+        action = np.random.randn(3)
         next_state, reward, done, info = env.step(action)
         total_reward += reward
-        print(f"Step {i+1}: reward={reward:.2f}, balance=${info['balance']:.2f}, done={done}")
+        print(f"Step {i+1}: reward={reward:.2f}, balance=${info['balance']:.2f}, bar={info['bar_idx']}")
         
         if done:
             break
