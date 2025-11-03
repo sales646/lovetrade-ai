@@ -54,7 +54,7 @@ class DistributedRLOrchestrator:
         return {
             # Distributed settings
             'world_size': 8,  # 8 GPUs
-            'envs_per_gpu': 10,  # Start with 10 per GPU (80 total) for stability
+            'envs_per_gpu': 1,  # Start with 1 per GPU for initial testing (8 total)
             'use_bf16': True,
             
             # PBT settings
