@@ -53,3 +53,6 @@ verify_jwt = false
 
 [functions.macro-data-fetcher]
 verify_jwt = false
+
+[functions.distributed-training-status]
+verify_jwt = false

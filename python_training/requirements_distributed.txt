@@ -1,0 +1,38 @@
+# Distributed RL Training Requirements
+# Install with: pip install -r requirements_distributed.txt
+
+# Core PyTorch with CUDA support
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Distributed training
+torch-distributed
+
+# RL libraries
+stable-baselines3>=2.0.0
+gymnasium>=0.28.0
+
+# Monitoring
+tensorboard>=2.12.0
+wandb>=0.15.0
+
+# Data processing
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+
+# Utilities
+tqdm>=4.65.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Configuration
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# GPU monitoring (nvidia-smi is system-level, this is Python wrapper)
+gpustat>=1.1.0
+pynvml>=11.5.0
+
+# Optional: Distributed coordination
+ray[default]>=2.5.0  # For advanced distributed orchestration
