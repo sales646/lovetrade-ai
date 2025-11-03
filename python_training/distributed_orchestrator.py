@@ -6,6 +6,7 @@ import os
 import sys
 import json
 import torch
+import numpy as np
 from datetime import datetime
 from typing import Dict, Optional
 from pathlib import Path
@@ -247,12 +248,24 @@ class DistributedRLOrchestrator:
     
     def _create_env_factory(self):
         """Create environment factory function"""
-        # This would create your trading environment
-        # For now, return a dummy factory
+        # Create a dummy environment for now
+        class DummyTradingEnv:
+            def __init__(self):
+                self.state_dim = 50
+                self.action_space_dim = 3
+                
+            def reset(self):
+                return np.random.randn(self.state_dim)
+            
+            def step(self, action):
+                next_state = np.random.randn(self.state_dim)
+                reward = np.random.randn()
+                done = np.random.random() < 0.1
+                info = {}
+                return next_state, reward, done, info
+        
         def env_fn():
-            # Import your trading environment here
-            # return TradingEnvironment(config=self.config)
-            pass
+            return DummyTradingEnv()
         return env_fn
     
     def _process_metrics(self, epoch: int, metrics: list):

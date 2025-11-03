@@ -54,7 +54,15 @@ class DistributedTrainer:
         self.setup(rank, world_size)
         
         # Create model on this GPU
-        model = model_class(config).to(rank)
+        try:
+            model = model_class(config).to(rank)
+        except TypeError:
+            # Fallback if model_class doesn't accept config
+            model = model_class(
+                state_dim=config.get('state_dim', 50),
+                action_dim=config.get('action_dim', 3)
+            ).to(rank)
+        
         if self.use_bf16:
             model = model.to(torch.bfloat16)
         
@@ -115,8 +123,19 @@ class DistributedTrainer:
         model.eval()
         
         # Create vectorized environments for this GPU
-        envs = [env_fn() for _ in range(num_envs)]
-        states = [env.reset() for env in envs]
+        try:
+            envs = [env_fn() for _ in range(num_envs)]
+            states = [env.reset() for env in envs]
+        except Exception as e:
+            print(f"⚠️  Warning on GPU {rank}: Could not create environments: {e}")
+            # Return empty rollouts
+            return {
+                'states': [],
+                'actions': [],
+                'rewards': [],
+                'dones': [],
+                'values': []
+            }
         
         rollouts = {
             'states': [],

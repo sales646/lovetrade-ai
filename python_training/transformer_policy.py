@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 
 
 class PositionalEncoding(nn.Module):
@@ -42,8 +42,9 @@ class TransformerPolicy(nn.Module):
     
     def __init__(
         self,
-        state_dim: int,
-        action_dim: int,
+        config: Dict = None,
+        state_dim: int = None,
+        action_dim: int = None,
         d_model: int = 256,
         nhead: int = 8,
         num_layers: int = 4,
@@ -52,6 +53,17 @@ class TransformerPolicy(nn.Module):
         max_seq_len: int = 100
     ):
         super().__init__()
+        
+        # Support both config dict and direct parameters
+        if config is not None:
+            state_dim = config.get('state_dim', state_dim or 50)
+            action_dim = config.get('action_dim', action_dim or 3)
+            d_model = config.get('d_model', d_model)
+            nhead = config.get('nhead', nhead)
+            num_layers = config.get('num_layers', num_layers)
+            dim_feedforward = config.get('dim_feedforward', dim_feedforward)
+            dropout = config.get('dropout', dropout)
+            max_seq_len = config.get('max_seq_len', max_seq_len)
         
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -211,8 +223,9 @@ class LightweightTransformerPolicy(TransformerPolicy):
     
     def __init__(
         self,
-        state_dim: int,
-        action_dim: int,
+        config: Dict = None,
+        state_dim: int = None,
+        action_dim: int = None,
         d_model: int = 128,
         nhead: int = 4,
         num_layers: int = 2,
@@ -220,7 +233,9 @@ class LightweightTransformerPolicy(TransformerPolicy):
         dropout: float = 0.1,
         max_seq_len: int = 50
     ):
+        # Pass all parameters to parent
         super().__init__(
+            config=config,
             state_dim=state_dim,
             action_dim=action_dim,
             d_model=d_model,
