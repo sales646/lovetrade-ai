@@ -160,13 +160,13 @@ class DistributedTrainer:
                 # Step environments
                 new_states = []
                 for i, (env, action) in enumerate(zip(envs, actions)):
-                    next_state, reward, done, info = env.step(action.cpu().numpy())
+                    next_state, reward, done, info = env.step(action.cpu().float().numpy())
                     
                     rollouts['states'].append(states[i])
-                    rollouts['actions'].append(action.cpu().numpy())
+                    rollouts['actions'].append(action.cpu().float().numpy())
                     rollouts['rewards'].append(reward)
                     rollouts['dones'].append(done)
-                    rollouts['values'].append(values[i].cpu().numpy())
+                    rollouts['values'].append(values[i].cpu().float().numpy())
                     
                     if done:
                         next_state = env.reset()
