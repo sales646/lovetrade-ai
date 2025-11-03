@@ -155,37 +155,51 @@ class TrainingConfig:
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
     
-    # Data - OPTIMIZED FOR MAXIMUM MARKET PREDICTION
+    # Data - MASSIVELY EXPANDED FOR 8x H100 TRAINING
     symbols: List[str] = None
     timeframe: str = "5m"
-    train_days: int = 30
-    val_days: int = 10
-    test_days: int = 5
-    embargo_days: int = 1
+    days_lookback: int = 365  # DOUBLED from 180 days for more regime coverage
+    train_days: int = 240  # 8 months training
+    val_days: int = 60   # 2 months validation
+    test_days: int = 30   # 1 month testing
+    embargo_days: int = 2
     
-    # Features - INCREASED FOR BETTER CONTEXT
-    frame_stack_size: int = 64  # Doubled from 32 for more historical context
-    feature_dim: int = 25  # Expanded: 15 technical + 5 news/macro + 5 time features
+    # Features - MASSIVELY EXPANDED WITH ADVANCED FEATURES
+    frame_stack_size: int = 120  # DOUBLED for 2x more historical context
+    feature_dim: int = 35  # Expanded: 15 technical + 8 advanced + 5 news/macro + 5 time + 2 options
     
-    # BC Training - OPTIMIZED PER PLAN
-    bc_epochs: int = 5000  # From plan: 5000 epochs with checkpoint every 1000
-    bc_batch_size: int = 512  # Increased for faster GPU training
-    bc_lr: float = 2e-4  # Stable learning rate
+    # BC Training - OPTIMIZED FOR 8x H100 (MASSIVE BATCHES)
+    bc_epochs: int = 10000  # DOUBLED for better convergence
+    bc_batch_size: int = 16384  # 32x larger for GPU efficiency  
+    bc_lr: float = 3e-4  # Higher LR for large batches
     bc_weight_decay: float = 1e-5
-    bc_early_stop_patience: int = 1000  # From plan: patience 800-1000
+    bc_early_stop_patience: int = 1500
+    bc_hidden_dims: List[int] = None  # Will default to [1024, 512, 256]
     
-    # PPO Training - OPTIMIZED FOR FASTER ITERATION
-    ppo_total_timesteps: int = 500_000  # 500k timesteps = ~122 rollouts (~20-40 min)
-    ppo_n_steps: int = 4096  # Increased from 2048 for better rollouts
-    ppo_batch_size: int = 4096  # Increased from 2048 for GPU efficiency
-    ppo_learning_rate: float = 2e-4  # Slightly lower for stability
-    ppo_gamma: float = 0.995  # Higher discount for long-term planning
-    ppo_gae_lambda: float = 0.98  # Higher for better advantage estimation
-    ppo_clip_range: float = 0.15  # Tighter for more conservative updates
+    # PPO Training - SCALED UP FOR 8x H100
+    ppo_total_timesteps: int = 50_000_000  # 100x increase for serious training
+    ppo_n_steps: int = 16384  # 4x larger rollouts
+    ppo_batch_size: int = 32768  # 8x larger batches
+    ppo_learning_rate: float = 3e-4
+    ppo_gamma: float = 0.997  # Even higher for long-horizon
+    ppo_gae_lambda: float = 0.98
+    ppo_clip_range: float = 0.15
     ppo_vf_coef: float = 0.5
-    ppo_ent_coef: float = 0.005  # Lower for more exploitation
+    ppo_ent_coef: float = 0.005
     ppo_max_grad_norm: float = 0.5
-    ppo_early_stop_patience: int = 10  # Stop if no improvement after 10 rollouts
+    ppo_early_stop_patience: int = 20  # More patience for longer training
+    
+    # Data Augmentation
+    use_data_augmentation: bool = True
+    augmentation_factor: int = 5  # 5x more training data
+    
+    # Ensemble
+    use_ensemble: bool = True
+    ensemble_mode: str = "weighted_vote"  # or "regime_based"
+    
+    # Hyperparameter Search
+    use_hpo: bool = False  # Set True to run hyperparameter optimization
+    hpo_trials: int = 100  # Number of Optuna trials
     
     # Reward shaping - OPTIMIZED FOR SHARPE RATIO
     lambda_risk: float = 0.3  # Higher risk penalty for better risk-adjusted returns
@@ -196,13 +210,31 @@ class TrainingConfig:
     
     def __post_init__(self):
         if self.symbols is None:
-            # EXPANDED SYMBOL LIST FOR DIVERSIFICATION
+            # MASSIVELY EXPANDED SYMBOL LIST - 50 LIQUID STOCKS ACROSS ALL SECTORS
             self.symbols = [
-                "SPY", "QQQ", "IWM", "DIA",  # Indices
-                "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META",  # Large caps
-                "AMD", "NFLX", "INTC", "CSCO",  # Tech
-                "JPM", "BAC", "GS",  # Finance
-                "XOM", "CVX",  # Energy
+                # Major Indices (4)
+                "SPY", "QQQ", "IWM", "DIA",
+                
+                # Mega Cap Tech (10)
+                "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "NFLX", "AMD", "INTC",
+                
+                # Large Cap Tech/Software (8)
+                "ORCL", "CRM", "ADBE", "CSCO", "AVGO", "QCOM", "TXN", "MU",
+                
+                # Finance (8)
+                "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "V",
+                
+                # Healthcare/Biotech (6)
+                "JNJ", "UNH", "PFE", "ABBV", "TMO", "LLY",
+                
+                # Consumer/Retail (6)
+                "AMZN", "WMT", "HD", "NKE", "MCD", "SBUX",
+                
+                # Energy/Commodities (5)
+                "XOM", "CVX", "SLB", "COP", "OXY",
+                
+                # Industrial (3)
+                "CAT", "BA", "GE"
             ]
 
 # ============================================================================
