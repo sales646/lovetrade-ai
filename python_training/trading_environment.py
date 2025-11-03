@@ -76,18 +76,28 @@ class TradingEnvironment:
         self.action_space_dim = 3  # position_size, stop_loss, take_profit
         
     def _load_historical_data(self):
-        """Load historical bars and indicators from Supabase (with caching)"""
-        # Create cache key
-        cache_key = f"{'-'.join(sorted(self.symbols))}_{self.timeframe}_{self.lookback_days}"
+        """Load historical bars and indicators from disk cache"""
+        import pickle
         
-        # Check cache first
-        if cache_key in TradingEnvironment._data_cache:
-            print(f"📦 Using cached data for {cache_key}")
-            cached = TradingEnvironment._data_cache[cache_key]
-            self.historical_bars = cached['bars'].copy()
-            self.indicators = {k: v.copy() for k, v in cached['indicators'].items()}
-            return
+        cache_file = "python_training/.market_data_cache.pkl"
         
+        # Try to load from cache file
+        if os.path.exists(cache_file):
+            print(f"📦 Loading from cache file: {cache_file}")
+            try:
+                with open(cache_file, 'rb') as f:
+                    cached = pickle.load(f)
+                
+                self.historical_bars = cached['bars']
+                self.indicators = cached['indicators']
+                
+                print(f"✅ Loaded {len(self.historical_bars):,} bars from cache")
+                print(f"   Date range: {self.historical_bars[0]['timestamp'][:10]} to {self.historical_bars[-1]['timestamp'][:10]}")
+                return
+            except Exception as e:
+                print(f"⚠️  Cache load failed: {e}, loading from Supabase...")
+        
+        # Fallback: load from Supabase
         print(f"📊 Loading historical market data from Supabase...")
         print(f"   Symbols: {self.symbols}")
         print(f"   Timeframe: {self.timeframe}")
@@ -121,13 +131,6 @@ class TradingEnvironment:
                 
                 # Load technical indicators
                 self._load_indicators()
-                
-                # Cache the data for future instances
-                TradingEnvironment._data_cache[cache_key] = {
-                    'bars': self.historical_bars.copy(),
-                    'indicators': {k: v.copy() for k, v in self.indicators.items()}
-                }
-                print(f"💾 Cached data for future environments")
                 
             else:
                 print("⚠️  No historical bars found - generating fallback data")
