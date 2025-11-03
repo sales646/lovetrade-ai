@@ -75,11 +75,35 @@ class TradingEnvironment:
                 .limit(10000) \
                 .execute()
             
-            if response.data:
+            if response.data and len(response.data) > 0:
                 self.trajectories = response.data
                 print(f"✅ Loaded {len(self.trajectories)} trajectories")
                 print(f"   Symbols: {set(t['symbol'] for t in self.trajectories)}")
                 print(f"   Timeframe: {self.timeframe}")
+                
+                # Data augmentation: Replicate data with noise to create more samples
+                if len(self.trajectories) < 100000:
+                    print(f"🔧 Augmenting data from {len(self.trajectories)} to 100,000+ samples...")
+                    original_count = len(self.trajectories)
+                    augmented = []
+                    
+                    # Replicate until we have 100k+ samples
+                    while len(augmented) + len(self.trajectories) < 100000:
+                        for traj in self.trajectories[:1000]:  # Batch augmentation
+                            # Create augmented version with small random variations
+                            aug_traj = traj.copy()
+                            if 'obs_features' in aug_traj and isinstance(aug_traj['obs_features'], dict):
+                                features = aug_traj['obs_features'].copy()
+                                # Add small noise to numeric features (±1%)
+                                for key in ['close', 'open', 'high', 'low', 'rsi_14', 'atr_14']:
+                                    if key in features and features[key] is not None:
+                                        noise = np.random.randn() * 0.01
+                                        features[key] = features[key] * (1 + noise)
+                                aug_traj['obs_features'] = features
+                            augmented.append(aug_traj)
+                    
+                    self.trajectories.extend(augmented)
+                    print(f"✅ Augmented to {len(self.trajectories)} total samples (from {original_count} originals)")
             else:
                 print("⚠️  No trajectories found - using synthetic data")
                 self._generate_synthetic_trajectories()
@@ -144,7 +168,7 @@ class TradingEnvironment:
         self.balance = self.initial_balance
         self.equity_history = [self.initial_balance]
         
-        # Randomly sample a starting trajectory
+        # Randomly sample a starting trajectory (with wraparound)
         if len(self.trajectories) > 0:
             self.current_trajectory_idx = np.random.randint(0, len(self.trajectories))
         
@@ -205,11 +229,11 @@ class TradingEnvironment:
         # Parse action
         position_size = np.clip(action[0] if len(action) > 0 else 0, -1, 1)
         
-        # Get current trajectory data
+        # Wraparound to beginning if we reach the end
         if self.current_trajectory_idx >= len(self.trajectories):
-            # Episode ended
-            return self._get_observation(), 0.0, True, {}
+            self.current_trajectory_idx = 0
         
+        # Get current trajectory data
         traj = self.trajectories[self.current_trajectory_idx]
         
         # Calculate reward based on position and price movement
