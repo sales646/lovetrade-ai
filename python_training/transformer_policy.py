@@ -206,12 +206,19 @@ class TransformerPolicy(nn.Module):
             
             return self.critic(x).squeeze(-1)
     
-    def get_log_probs(self, action: torch.Tensor) -> torch.Tensor:
-        """Get log probabilities for given actions"""
-        # This is a simplified version - in practice, you'd need to recompute
-        # the action distribution
+    def get_log_probs(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        """Get log probabilities for given actions (with gradients for training)"""
+        if state.dim() == 2:
+            state = state.unsqueeze(1)
+        
+        x = self.input_embedding(state)
+        x = self.pos_encoder(x)
+        x = self.transformer_encoder(x)
+        x = x[:, -1, :]
+        
+        action_mean = self.actor(x)
         action_std = torch.exp(self.action_log_std)
-        dist = torch.distributions.Normal(0, action_std)  # Centered at 0
+        dist = torch.distributions.Normal(action_mean, action_std)
         return dist.log_prob(action).sum(dim=-1)
 
 

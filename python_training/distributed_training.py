@@ -134,7 +134,8 @@ class DistributedTrainer:
                 'actions': [],
                 'rewards': [],
                 'dones': [],
-                'values': []
+                'values': [],
+                'log_probs': []
             }
         
         rollouts = {
@@ -142,7 +143,8 @@ class DistributedTrainer:
             'actions': [],
             'rewards': [],
             'dones': [],
-            'values': []
+            'values': [],
+            'log_probs': []  # Store old log probs for PPO
         }
         
         steps_per_rollout = config.get("steps_per_rollout", 512)
@@ -167,6 +169,7 @@ class DistributedTrainer:
                     rollouts['rewards'].append(reward)
                     rollouts['dones'].append(done)
                     rollouts['values'].append(values[i].cpu().float().numpy())
+                    rollouts['log_probs'].append(log_probs[i].cpu().float().numpy())  # Store log probs
                     
                     if done:
                         next_state = env.reset()
@@ -187,10 +190,14 @@ class DistributedTrainer:
         model.train()
         
         # Convert rollouts to tensors
-        states = torch.FloatTensor(rollouts['states']).to(model.device)
-        actions = torch.FloatTensor(rollouts['actions']).to(model.device)
-        rewards = torch.FloatTensor(rollouts['rewards']).to(model.device)
-        values = torch.FloatTensor(rollouts['values']).to(model.device)
+        # Get device from model (handle DDP wrapping)
+        device = next(model.parameters()).device
+        
+        states = torch.FloatTensor(rollouts['states']).to(device)
+        actions = torch.FloatTensor(rollouts['actions']).to(device)
+        rewards = torch.FloatTensor(rollouts['rewards']).to(device)
+        values = torch.FloatTensor(rollouts['values']).to(device)
+        old_log_probs = torch.FloatTensor(rollouts['log_probs']).to(device)
         
         if self.use_bf16:
             states = states.to(torch.bfloat16)
@@ -218,12 +225,18 @@ class DistributedTrainer:
                 batch_actions = actions[batch_indices]
                 batch_advantages = advantages[batch_indices]
                 batch_returns = returns[batch_indices]
+                batch_old_log_probs = old_log_probs[batch_indices]
                 
-                # Forward pass
-                _, new_values, new_log_probs = model(batch_states)
+                # Forward pass - get new log probs for old actions
+                # Access the underlying module if wrapped in DDP
+                policy_module = model.module if hasattr(model, 'module') else model
+                
+                # Get new values and log probs for the old actions
+                _, new_values, _ = model(batch_states)
+                new_log_probs = policy_module.get_log_probs(batch_states, batch_actions)
                 
                 # PPO loss
-                ratio = torch.exp(new_log_probs - model.get_log_probs(batch_actions))
+                ratio = torch.exp(new_log_probs - batch_old_log_probs)
                 clip_param = config.get("clip_param", 0.2)
                 
                 surr1 = ratio * batch_advantages
