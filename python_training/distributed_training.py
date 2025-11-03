@@ -22,7 +22,7 @@ class DistributedTrainer:
         world_size: int = 8,
         backend: str = "nccl",
         use_bf16: bool = True,
-        envs_per_gpu: int = 256  # High parallelism for H100
+        envs_per_gpu: int = 16  # Balanced for CPU/GPU pipeline
     ):
         self.world_size = world_size
         self.backend = backend

@@ -24,6 +24,10 @@ class TradingEnvironment:
     - No simulation or augmentation - pure historical data
     """
     
+    # Class-level cache shared across all instances
+    _data_cache: Dict = {}
+    _cache_lock = None
+    
     def __init__(
         self,
         supabase_url: Optional[str] = None,
@@ -64,7 +68,7 @@ class TradingEnvironment:
         self.balance = initial_balance
         self.equity_history = [initial_balance]
         
-        # Load historical data
+        # Load historical data (using cache if available)
         self._load_historical_data()
         
         # Define observation space dimensions
@@ -72,7 +76,18 @@ class TradingEnvironment:
         self.action_space_dim = 3  # position_size, stop_loss, take_profit
         
     def _load_historical_data(self):
-        """Load historical bars and indicators from Supabase"""
+        """Load historical bars and indicators from Supabase (with caching)"""
+        # Create cache key
+        cache_key = f"{'-'.join(sorted(self.symbols))}_{self.timeframe}_{self.lookback_days}"
+        
+        # Check cache first
+        if cache_key in TradingEnvironment._data_cache:
+            print(f"📦 Using cached data for {cache_key}")
+            cached = TradingEnvironment._data_cache[cache_key]
+            self.historical_bars = cached['bars'].copy()
+            self.indicators = {k: v.copy() for k, v in cached['indicators'].items()}
+            return
+        
         print(f"📊 Loading historical market data from Supabase...")
         print(f"   Symbols: {self.symbols}")
         print(f"   Timeframe: {self.timeframe}")
@@ -106,6 +121,13 @@ class TradingEnvironment:
                 
                 # Load technical indicators
                 self._load_indicators()
+                
+                # Cache the data for future instances
+                TradingEnvironment._data_cache[cache_key] = {
+                    'bars': self.historical_bars.copy(),
+                    'indicators': {k: v.copy() for k, v in self.indicators.items()}
+                }
+                print(f"💾 Cached data for future environments")
                 
             else:
                 print("⚠️  No historical bars found - generating fallback data")

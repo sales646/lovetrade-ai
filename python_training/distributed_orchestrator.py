@@ -54,7 +54,7 @@ class DistributedRLOrchestrator:
         return {
             # Distributed settings
             'world_size': 2,  # 2 H100 GPUs
-            'envs_per_gpu': 256,  # 256 per GPU (512 total) - maximize GPU usage
+            'envs_per_gpu': 16,  # 16 per GPU (32 total) - balanced for CPU/GPU
             'use_bf16': True,
             
             # PBT settings
