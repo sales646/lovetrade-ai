@@ -151,8 +151,8 @@ class DistributedTrainer:
         
         with torch.no_grad():
             for step in range(steps_per_rollout):
-                # Batch states
-                state_batch = torch.FloatTensor(states).to(rank)
+                # Batch states - convert to numpy array first for efficiency
+                state_batch = torch.FloatTensor(np.array(states)).to(rank)
                 if self.use_bf16:
                     state_batch = state_batch.to(torch.bfloat16)
                 
