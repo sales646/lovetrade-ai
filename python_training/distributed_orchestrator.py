@@ -53,12 +53,12 @@ class DistributedRLOrchestrator:
         """Default configuration for distributed training"""
         return {
             # Distributed settings
-            'world_size': 8,  # 8 GPUs
-            'envs_per_gpu': 1,  # Start with 1 per GPU for initial testing (8 total)
+            'world_size': 2,  # 2 H100 GPUs
+            'envs_per_gpu': 4,  # 4 per GPU (8 total)
             'use_bf16': True,
             
             # PBT settings
-            'population_size': 8,  # One per GPU
+            'population_size': 2,  # One per GPU
             'exploit_interval': 5,
             'pbt_enabled': True,
             
