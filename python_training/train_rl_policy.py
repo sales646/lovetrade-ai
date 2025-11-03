@@ -36,6 +36,116 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info(f"Using device: {device}")
 
 # ============================================================================
+# Early Stopping
+# ============================================================================
+
+class EarlyStopping:
+    """
+    Advanced Early Stopping with:
+    - Patience-based stopping on validation metric
+    - Divergence detection (train vs val)
+    - Checkpoint saving every N epochs
+    - Top-K checkpoint ensemble tracking
+    """
+    
+    def __init__(
+        self,
+        patience: int = 1000,
+        min_delta: float = 0.001,
+        checkpoint_every: int = 1000,
+        top_k: int = 3,
+        metric_name: str = "val_loss",
+        mode: str = "min"
+    ):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.checkpoint_every = checkpoint_every
+        self.top_k = top_k
+        self.metric_name = metric_name
+        self.mode = mode
+        
+        self.counter = 0
+        self.best_metric = float('inf') if mode == "min" else float('-inf')
+        self.best_epoch = 0
+        self.best_checkpoint = None
+        self.top_checkpoints = []  # List of (metric, epoch, path)
+        
+        self.train_metrics = []
+        self.val_metrics = []
+    
+    def __call__(
+        self,
+        epoch: int,
+        val_metric: float,
+        train_metric: Optional[float] = None,
+        checkpoint_path: Optional[str] = None
+    ) -> bool:
+        """
+        Returns True if training should stop
+        """
+        
+        # Track metrics for divergence detection
+        self.val_metrics.append(val_metric)
+        if train_metric is not None:
+            self.train_metrics.append(train_metric)
+        
+        # Check if improved
+        is_better = (
+            (self.mode == "min" and val_metric < self.best_metric - self.min_delta) or
+            (self.mode == "max" and val_metric > self.best_metric + self.min_delta)
+        )
+        
+        if is_better:
+            self.best_metric = val_metric
+            self.best_epoch = epoch
+            self.counter = 0
+            
+            if checkpoint_path:
+                self.best_checkpoint = checkpoint_path
+                # Add to top-K
+                self.top_checkpoints.append((val_metric, epoch, checkpoint_path))
+                # Sort and keep top K
+                if self.mode == "min":
+                    self.top_checkpoints.sort(key=lambda x: x[0])
+                else:
+                    self.top_checkpoints.sort(key=lambda x: x[0], reverse=True)
+                self.top_checkpoints = self.top_checkpoints[:self.top_k]
+                
+            logger.info(f"✓ New best {self.metric_name}: {val_metric:.6f} at epoch {epoch}")
+        else:
+            self.counter += 1
+        
+        # Checkpoint saving every N epochs
+        if epoch > 0 and epoch % self.checkpoint_every == 0 and checkpoint_path:
+            logger.info(f"💾 Checkpoint saved at epoch {epoch}")
+        
+        # Divergence detection: if train-val gap is widening rapidly
+        if len(self.train_metrics) >= 5 and len(self.val_metrics) >= 5:
+            recent_train = np.mean(self.train_metrics[-5:])
+            recent_val = np.mean(self.val_metrics[-5:])
+            gap = abs(recent_val - recent_train)
+            
+            if self.mode == "min" and gap > 0.3:  # Val loss >> Train loss
+                logger.warning(f"⚠️ Divergence detected! Train-Val gap: {gap:.4f}")
+                return True
+        
+        # Patience exceeded
+        if self.counter >= self.patience:
+            logger.info(
+                f"🛑 Early stopping triggered after {epoch} epochs. "
+                f"Best {self.metric_name}: {self.best_metric:.6f} at epoch {self.best_epoch}"
+            )
+            return True
+        
+        return False
+    
+    def get_best_checkpoint(self) -> Optional[str]:
+        return self.best_checkpoint
+    
+    def get_top_checkpoints(self) -> List[Tuple[float, int, str]]:
+        return self.top_checkpoints
+
+# ============================================================================
 # Configuration
 # ============================================================================
 
@@ -57,15 +167,15 @@ class TrainingConfig:
     frame_stack_size: int = 64  # Doubled from 32 for more historical context
     feature_dim: int = 25  # Expanded: 15 technical + 5 news/macro + 5 time features
     
-    # BC Training - OPTIMIZED FOR BETTER LEARNING
-    bc_epochs: int = 100  # Increased from 50 for better convergence
-    bc_batch_size: int = 512  # Increased from 256 for faster GPU training
-    bc_lr: float = 2e-4  # Slightly lower for more stable learning
+    # BC Training - OPTIMIZED PER PLAN
+    bc_epochs: int = 5000  # From plan: 5000 epochs with checkpoint every 1000
+    bc_batch_size: int = 512  # Increased for faster GPU training
+    bc_lr: float = 2e-4  # Stable learning rate
     bc_weight_decay: float = 1e-5
-    bc_early_stop_patience: int = 10  # More patience for better models
+    bc_early_stop_patience: int = 1000  # From plan: patience 800-1000
     
-    # PPO Training - MAXIMIZED FOR BEST PERFORMANCE
-    ppo_total_timesteps: int = 500000  # 5x increase for deeper learning
+    # PPO Training - MAXIMIZED PER PLAN (10-20M timesteps)
+    ppo_total_timesteps: int = 10_000_000  # From plan: 10-20M timesteps
     ppo_n_steps: int = 4096  # Increased from 2048 for better rollouts
     ppo_batch_size: int = 4096  # Increased from 2048 for GPU efficiency
     ppo_learning_rate: float = 2e-4  # Slightly lower for stability
@@ -75,6 +185,7 @@ class TrainingConfig:
     ppo_vf_coef: float = 0.5
     ppo_ent_coef: float = 0.005  # Lower for more exploitation
     ppo_max_grad_norm: float = 0.5
+    ppo_early_stop_patience: int = 10  # Stop if no improvement after 10 rollouts
     
     # Reward shaping - OPTIMIZED FOR SHARPE RATIO
     lambda_risk: float = 0.3  # Higher risk penalty for better risk-adjusted returns
@@ -257,12 +368,12 @@ def train_bc(
     run_id: str,
     device: torch.device = torch.device("cpu")
 ) -> BCPolicy:
-    """Train behavior cloning policy"""
+    """Train behavior cloning policy with advanced early stopping"""
     
     logger.info("Starting Behavior Cloning training")
     
     obs_dim = train_dataset.obs.shape[1]
-    policy = BCPolicy(obs_dim).to(device)  # Move to GPU
+    policy = BCPolicy(obs_dim).to(device)
     
     train_loader = DataLoader(train_dataset, batch_size=config.bc_batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config.bc_batch_size)
@@ -270,8 +381,15 @@ def train_bc(
     optimizer = optim.Adam(policy.parameters(), lr=config.bc_lr, weight_decay=config.bc_weight_decay)
     criterion = nn.CrossEntropyLoss(reduction='none')
     
-    best_val_loss = float('inf')
-    patience_counter = 0
+    # Initialize advanced early stopping
+    early_stopping = EarlyStopping(
+        patience=config.bc_early_stop_patience,
+        min_delta=0.001,
+        checkpoint_every=1000,
+        top_k=3,
+        metric_name="val_loss",
+        mode="min"
+    )
     
     for epoch in range(config.bc_epochs):
         # Training
@@ -281,7 +399,6 @@ def train_bc(
         train_total = 0
         
         for obs, actions, rewards, weights in train_loader:
-            # Move to device
             obs, actions, weights = obs.to(device), actions.to(device), weights.to(device)
             
             optimizer.zero_grad()
@@ -308,7 +425,6 @@ def train_bc(
         
         with torch.no_grad():
             for obs, actions, rewards, weights in val_loader:
-                # Move to device
                 obs, actions, weights = obs.to(device), actions.to(device), weights.to(device)
                 
                 logits = policy(obs)
@@ -322,21 +438,48 @@ def train_bc(
         val_loss /= len(val_loader)
         val_acc = val_correct / val_total
         
-        logger.info(f"Epoch {epoch+1}/{config.bc_epochs} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        logger.info(
+            f"BC Epoch {epoch+1}/{config.bc_epochs} - "
+            f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
+            f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}"
+        )
         
-        # Early stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            torch.save(policy.state_dict(), f"checkpoints/policy_bc_{run_id}.pt")
-        else:
-            patience_counter += 1
-            if patience_counter >= config.bc_early_stop_patience:
-                logger.info(f"Early stopping at epoch {epoch+1}")
-                break
+        # Save checkpoint
+        checkpoint_path = f"checkpoints/policy_bc_{run_id}_epoch{epoch+1}.pt"
+        if (epoch + 1) % 1000 == 0 or epoch == 0:  # Save every 1000 epochs
+            torch.save(policy.state_dict(), checkpoint_path)
+        
+        # Early stopping check
+        should_stop = early_stopping(
+            epoch=epoch+1,
+            val_metric=val_loss,
+            train_metric=train_loss,
+            checkpoint_path=checkpoint_path if val_loss == early_stopping.best_metric else None
+        )
+        
+        # Additional stopping criteria from plan
+        if val_acc > 0.85:
+            logger.info(f"🎯 Stopping: Validation accuracy exceeded 85% ({val_acc:.2%})")
+            break
+        
+        if train_loss < 0.01:
+            logger.info(f"🎯 Stopping: Training loss below threshold ({train_loss:.6f})")
+            break
+        
+        if should_stop:
+            break
     
-    # Load best model
-    policy.load_state_dict(torch.load(f"checkpoints/policy_bc_{run_id}.pt", map_location=device))
+    # Load best checkpoint from top-K ensemble
+    best_checkpoint = early_stopping.get_best_checkpoint()
+    if best_checkpoint and os.path.exists(best_checkpoint):
+        policy.load_state_dict(torch.load(best_checkpoint, map_location=device))
+        logger.info(f"✅ Loaded best checkpoint: {best_checkpoint}")
+    
+    # Log top checkpoints for ensemble
+    top_checkpoints = early_stopping.get_top_checkpoints()
+    logger.info(f"📊 Top-3 checkpoints for ensemble:")
+    for metric, ep, path in top_checkpoints:
+        logger.info(f"  - Epoch {ep}: val_loss={metric:.6f} ({path})")
     
     return policy
 
@@ -554,18 +697,39 @@ class TradingEnv(gym.Env):
 # ============================================================================
 
 class MetricsCallback(BaseCallback):
-    """Callback to log comprehensive metrics during PPO training"""
+    """Callback to log comprehensive metrics during PPO training with early stopping"""
     
-    def __init__(self, client: Client, run_id: str, verbose: int = 0):
+    def __init__(
+        self,
+        client: Client,
+        run_id: str,
+        val_env: Optional[gym.Env] = None,
+        early_stopping_patience: int = 10,
+        verbose: int = 0
+    ):
         super().__init__(verbose)
         self.client = client
         self.run_id = run_id
+        self.val_env = val_env
         
         # Collect episode info from completed episodes
         self.episode_infos = []
         self.step_count = 0
         self.last_log_step = 0
         self.log_interval = 2048  # Log every rollout (PPO default)
+        
+        # Early stopping for PPO
+        self.early_stopping = EarlyStopping(
+            patience=early_stopping_patience,
+            min_delta=0.01,
+            checkpoint_every=5,  # Every 5 rollouts
+            top_k=3,
+            metric_name="val_sharpe",
+            mode="max"
+        )
+        
+        self.rollout_count = 0
+        self.best_sharpe = float('-inf')
     
     def _on_step(self) -> bool:
         self.step_count += 1
@@ -579,10 +743,12 @@ class MetricsCallback(BaseCallback):
         return True
     
     def _on_rollout_end(self) -> None:
-        """Log comprehensive metrics after each rollout"""
+        """Log comprehensive metrics and check early stopping after each rollout"""
         
         if len(self.episode_infos) == 0:
             return
+        
+        self.rollout_count += 1
         
         # Aggregate episode statistics
         mean_reward = np.mean([ep['r'] for ep in self.episode_infos])
@@ -616,6 +782,8 @@ class MetricsCallback(BaseCallback):
         policy_loss = self.model.logger.name_to_value.get("train/policy_loss", 0)
         value_loss = self.model.logger.name_to_value.get("train/value_loss", 0)
         entropy = self.model.logger.name_to_value.get("train/entropy", 0)
+        clip_fraction = self.model.logger.name_to_value.get("train/clip_fraction", 0)
+        approx_kl = self.model.logger.name_to_value.get("train/approx_kl", 0)
         
         # Calculate epoch number
         epoch = self.step_count // self.log_interval
@@ -640,16 +808,48 @@ class MetricsCallback(BaseCallback):
         try:
             self.client.table("training_metrics").insert(metrics).execute()
             logger.info(
-                f"Epoch {epoch}: reward={mean_reward:.3f}, win_rate={mean_win_rate:.1f}%, "
+                f"PPO Rollout {self.rollout_count}: reward={mean_reward:.3f}, win_rate={mean_win_rate:.1f}%, "
                 f"sharpe={mean_sharpe:.2f}, pf={mean_profit_factor:.2f}, "
-                f"trades={total_trades}"
+                f"entropy={entropy:.4f}, approx_kl={approx_kl:.6f}"
             )
         except Exception as e:
             logger.error(f"Failed to log metrics: {e}")
         
+        # Early stopping checks based on plan
+        
+        # 1. Entropy collapse detection (policy collapsed to deterministic)
+        if entropy < 0.1:
+            logger.warning(f"⚠️ Policy collapsed! Entropy={entropy:.4f} < 0.1")
+            return False  # Stop training
+        
+        # 2. KL divergence too high (instability)
+        if approx_kl > 0.5:
+            logger.warning(f"⚠️ Training unstable! KL divergence={approx_kl:.4f} > 0.5")
+            return False
+        
+        # 3. Validation-based early stopping on Sharpe ratio
+        checkpoint_path = f"checkpoints/policy_ppo_{self.run_id}_rollout{self.rollout_count}.zip"
+        if self.rollout_count % 5 == 0:  # Save every 5 rollouts
+            self.model.save(checkpoint_path)
+        
+        should_stop = self.early_stopping(
+            epoch=self.rollout_count,
+            val_metric=mean_sharpe,
+            checkpoint_path=checkpoint_path if mean_sharpe > self.best_sharpe else None
+        )
+        
+        if mean_sharpe > self.best_sharpe:
+            self.best_sharpe = mean_sharpe
+        
+        if should_stop:
+            logger.info("🛑 PPO early stopping triggered")
+            return False  # Stop training
+        
         # Clear collected episodes
         self.episode_infos = []
         self.last_log_step = self.step_count
+        
+        return True
 
 
 def train_ppo(
@@ -660,7 +860,7 @@ def train_ppo(
     run_id: str,
     client: Client
 ) -> PPO:
-    """Train PPO policy starting from BC weights"""
+    """Train PPO policy starting from BC weights with early stopping"""
     
     logger.info("Starting PPO training")
     
@@ -686,12 +886,34 @@ def train_ppo(
     
     # TODO: Load BC weights into PPO policy (requires model surgery)
     
-    # Train with callback
-    callback = MetricsCallback(client, run_id)
-    model.learn(total_timesteps=config.ppo_total_timesteps, callback=callback)
+    # Train with callback and early stopping
+    callback = MetricsCallback(
+        client,
+        run_id,
+        early_stopping_patience=config.ppo_early_stop_patience
+    )
     
-    # Save model
-    model.save(f"checkpoints/policy_ppo_{run_id}.zip")
+    try:
+        model.learn(total_timesteps=config.ppo_total_timesteps, callback=callback)
+    except KeyboardInterrupt:
+        logger.info("Training interrupted by user")
+    
+    # Load best checkpoint from early stopping
+    best_checkpoint = callback.early_stopping.get_best_checkpoint()
+    if best_checkpoint and os.path.exists(best_checkpoint):
+        model = PPO.load(best_checkpoint, env=env)
+        logger.info(f"✅ Loaded best PPO checkpoint: {best_checkpoint}")
+    
+    # Log top checkpoints
+    top_checkpoints = callback.early_stopping.get_top_checkpoints()
+    logger.info(f"📊 Top-3 PPO checkpoints for ensemble:")
+    for metric, rollout, path in top_checkpoints:
+        logger.info(f"  - Rollout {rollout}: sharpe={metric:.2f} ({path})")
+    
+    # Save final model
+    final_path = f"checkpoints/policy_ppo_{run_id}_final.zip"
+    model.save(final_path)
+    logger.info(f"💾 Final model saved: {final_path}")
     
     return model
 
