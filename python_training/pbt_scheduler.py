@@ -64,10 +64,18 @@ class PBTScheduler:
                     hyperparams[key] = random.choice(value_range)
                 else:
                     low, high = value_range
-                    if key in ['batch_size', 'n_steps']:
-                        hyperparams[key] = int(np.exp(np.random.uniform(np.log(low), np.log(high))))
+                    # Use log-uniform sampling for positive ranges, linear for others
+                    if low > 0 and high > low:
+                        if key in ['batch_size', 'n_steps']:
+                            hyperparams[key] = int(np.exp(np.random.uniform(np.log(low), np.log(high))))
+                        else:
+                            hyperparams[key] = np.exp(np.random.uniform(np.log(low), np.log(high)))
                     else:
-                        hyperparams[key] = np.exp(np.random.uniform(np.log(low), np.log(high)))
+                        # Fallback to linear sampling
+                        if key in ['batch_size', 'n_steps']:
+                            hyperparams[key] = int(np.random.uniform(low, high))
+                        else:
+                            hyperparams[key] = np.random.uniform(low, high)
             
             self.population.append(Population(
                 id=i,
