@@ -209,7 +209,7 @@ class DistributedTrainer:
                     next_state, reward, done, info = env.step(action)
                     
                     rollouts['states'].append(states[i])
-                    rollouts['actions'].append(action.cpu().float().numpy())
+                    rollouts['actions'].append(action)  # action is already numpy
                     rollouts['rewards'].append(float(reward))  # Ensure scalar
                     rollouts['dones'].append(float(done))  # Ensure scalar
                     rollouts['values'].append(values[i].cpu().float().item())  # Use .item() for scalar
