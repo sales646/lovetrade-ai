@@ -119,11 +119,11 @@ def pretrain_bc(
             states = states.to(device, non_blocking=True)
             actions = actions.to(device, non_blocking=True).squeeze()
             
-            # Forward pass
-            action_probs, _ = policy(states)
+            # Forward pass - get action logits for BC training
+            action_logits = policy.get_action_logits(states)
             
             # BC loss: cross-entropy between predicted and expert actions
-            loss = criterion(action_probs, actions)
+            loss = criterion(action_logits, actions)
             
             # Backward pass
             optimizer.zero_grad()
@@ -134,7 +134,7 @@ def pretrain_bc(
             # Track metrics
             epoch_loss += loss.item()
             
-            pred_actions = torch.argmax(action_probs, dim=-1)
+            pred_actions = torch.argmax(action_logits, dim=-1)
             epoch_correct += (pred_actions == actions).sum().item()
             epoch_total += actions.size(0)
         

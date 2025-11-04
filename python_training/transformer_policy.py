@@ -206,6 +206,18 @@ class TransformerPolicy(nn.Module):
             
             return self.critic(x).squeeze(-1)
     
+    def get_action_logits(self, state: torch.Tensor) -> torch.Tensor:
+        """Get action logits for discrete actions (for BC training)"""
+        if state.dim() == 2:
+            state = state.unsqueeze(1)
+        
+        x = self.input_embedding(state)
+        x = self.pos_encoder(x)
+        x = self.transformer_encoder(x)
+        x = x[:, -1, :]
+        
+        return self.actor(x)  # Return raw logits for discrete actions
+    
     def get_log_probs(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Get log probabilities for given actions (with gradients for training)"""
         if state.dim() == 2:
