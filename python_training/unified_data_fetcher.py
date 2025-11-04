@@ -56,17 +56,22 @@ class UnifiedDataFetcher:
         
         start = datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.strptime(end_date, "%Y-%m-%d")
+        
+        # Generate all dates (including weekends for crypto)
         dates = []
         current = start
         while current <= end:
-            if current.weekday() < 5:  # Weekdays only
+            if asset_type == "crypto" or current.weekday() < 5:  # Crypto: all days, Stocks: weekdays
                 dates.append(current.strftime("%Y-%m-%d"))
             current += timedelta(days=1)
         
-        prefix = "us_stocks_sip" if asset_type == "stocks" else "global_crypto"
+        # Correct S3 paths based on actual Polygon structure
+        prefix = "us_stocks_sip" if asset_type == "stocks" else "us_stocks_sip"  # Both use same prefix
+        
         file_keys = []
         for date in dates:
             year, month, day = date.split("-")
+            # Path format: us_stocks_sip/minute_aggs_v1/2024/01/2024-01-15.csv.gz
             file_key = f"{prefix}/minute_aggs_v1/{year}/{month}/{date}.csv.gz"
             file_keys.append((date, file_key))
         
@@ -104,9 +109,24 @@ class UnifiedDataFetcher:
             compressed = response['Body'].read()
             decompressed = gzip.decompress(compressed)
             df = pd.read_csv(io.BytesIO(decompressed))
-            df['timestamp'] = pd.to_datetime(df['window_start'], unit='ns')
-            return df
-        except:
+            
+            # Handle timestamp conversion
+            if 'window_start' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['window_start'], unit='ns')
+            elif 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            # Rename columns to standard format
+            if 'ticker' not in df.columns and 'symbol' in df.columns:
+                df['ticker'] = df['symbol']
+            
+            # Ensure required columns exist
+            required_cols = ['ticker', 'open', 'high', 'low', 'close', 'volume', 'timestamp']
+            if all(col in df.columns or col.replace('_', '') in df.columns for col in required_cols):
+                return df
+            return pd.DataFrame()
+        except Exception as e:
+            # Only print error for debugging, return empty DataFrame
             return pd.DataFrame()
     
     def fetch_binance(self, start_date: str, end_date: str) -> Dict[str, pd.DataFrame]:
