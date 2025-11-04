@@ -51,17 +51,32 @@ def discover_symbols_from_polygon_files(polygon_dir: str = "./polygon_data") -> 
     stocks = set()
     crypto = set()
     
-    # Scan for parquet/csv files
+    # Scan for parquet files in structured directories
+    # Structure: us_stocks_sip/minute_aggs_v1/SYMBOL/ or crypto/minute_aggs_v1/SYMBOL/
     for file_path in path.rglob("*.parquet"):
-        # Extract symbol from filename (e.g., "AAPL_2024_01.parquet")
-        symbol = file_path.stem.split("_")[0]
+        path_parts = file_path.parts
         
-        if "crypto" in str(file_path).lower() or "btc" in symbol.lower():
-            crypto.add(symbol)
-        else:
-            stocks.add(symbol)
+        # Check if crypto or stock based on directory structure
+        if "crypto" in path_parts:
+            # Extract symbol from path (e.g., crypto/minute_aggs_v1/BTCUSD/2024/01/data.parquet)
+            try:
+                idx = path_parts.index("minute_aggs_v1")
+                if idx + 1 < len(path_parts):
+                    symbol = path_parts[idx + 1]
+                    crypto.add(symbol)
+            except (ValueError, IndexError):
+                pass
+        elif "us_stocks_sip" in path_parts:
+            # Extract symbol from path (e.g., us_stocks_sip/minute_aggs_v1/AAPL/2024/01/data.parquet)
+            try:
+                idx = path_parts.index("minute_aggs_v1")
+                if idx + 1 < len(path_parts):
+                    symbol = path_parts[idx + 1]
+                    stocks.add(symbol)
+            except (ValueError, IndexError):
+                pass
     
-    print(f"📂 Discovered {len(stocks)} stocks, {len(crypto)} crypto from Polygon files")
+    print(f"📂 Discovered {len(stocks)} stocks, {len(crypto)} crypto from Polygon S3 files")
     return {"stocks": sorted(stocks), "crypto": sorted(crypto)}
 
 
