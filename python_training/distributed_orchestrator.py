@@ -15,6 +15,16 @@ from gpu_monitor import GPUMonitor, LoadBalancer
 from trading_environment import create_trading_env
 
 
+# Module-level function for multiprocessing pickle compatibility
+def _create_env_for_training(symbols, enable_multi_market=True, phase="train"):
+    """Environment factory for distributed training"""
+    return create_trading_env(
+        symbols=symbols,
+        enable_multi_market=enable_multi_market,
+        phase=phase
+    )
+
+
 class DistributedRLOrchestrator:
     """Master orchestrator with BC→PPO pipeline"""
     
@@ -112,15 +122,20 @@ class DistributedRLOrchestrator:
         
         # Phase 2: PPO Training
         print("🎮 PHASE 2: PPO Training")
+        
+        # Store symbols for env creation
+        symbols = self.config['symbols']
+        
         try:
             for epoch in range(self.config['epochs']):
                 print(f"\n📅 Epoch {epoch+1}/{self.config['epochs']}")
                 
-                env_fn = lambda: create_trading_env(symbols=self.config['symbols'], 
-                                                   enable_multi_market=True, phase="train")
+                # Use module-level function for pickling
+                from functools import partial
+                make_env = partial(_create_env_for_training, symbols=symbols)
                 
                 metrics = self.distributed_trainer.launch(
-                    config=self.config, model_class=TransformerPolicy, env_fn=env_fn
+                    config=self.config, model_class=TransformerPolicy, env_fn=make_env
                 )
                 
                 if (epoch + 1) % 10 == 0:
