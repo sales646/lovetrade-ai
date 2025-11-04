@@ -173,9 +173,15 @@ class TrainingConfig:
     test_days: int = 30   # 1 month testing
     embargo_days: int = 2
     
-    # Features - MASSIVELY EXPANDED WITH ADVANCED FEATURES
+    # Features - MASSIVELY EXPANDED WITH ADVANCED FEATURES + MULTI-MARKET
     frame_stack_size: int = 120  # DOUBLED for 2x more historical context
-    feature_dim: int = 35  # Expanded: 15 technical + 8 advanced + 5 news/macro + 5 time + 2 options
+    feature_dim: int = 52  # EXPANDED: 50 base + 2 multi-market (market_type, normalized_volatility)
+    
+    # Multi-Market Training
+    enable_multi_market: bool = True  # Enable cross-market training (stocks + crypto)
+    crypto_stock_ratio: float = 0.7  # 70% crypto, 30% stock for PPO (more variation)
+    crypto_timeframe: str = "1m"  # Crypto uses 1-minute bars
+    stock_timeframe: str = "5m"   # Stocks use 5-minute bars
     
     # BC Training - OPTIMIZED FOR 8x H100 (MASSIVE BATCHES)
     bc_epochs: int = 10000  # DOUBLED for better convergence
@@ -226,8 +232,10 @@ class TrainingConfig:
     
     def __post_init__(self):
         if self.symbols is None:
-            # MASSIVELY EXPANDED SYMBOL LIST - 50 LIQUID STOCKS ACROSS ALL SECTORS
-            self.symbols = [
+            # MULTI-MARKET SYMBOL LIST: 50 STOCKS + 17 CRYPTO = 67 INSTRUMENTS
+            
+            # === STOCKS (50) ===
+            stock_symbols = [
                 # Major Indices (4)
                 "SPY", "QQQ", "IWM", "DIA",
                 
@@ -244,7 +252,7 @@ class TrainingConfig:
                 "JNJ", "UNH", "PFE", "ABBV", "TMO", "LLY",
                 
                 # Consumer/Retail (6)
-                "AMZN", "WMT", "HD", "NKE", "MCD", "SBUX",
+                "WMT", "HD", "NKE", "MCD", "SBUX", "TGT",
                 
                 # Energy/Commodities (5)
                 "XOM", "CVX", "SLB", "COP", "OXY",
@@ -252,6 +260,36 @@ class TrainingConfig:
                 # Industrial (3)
                 "CAT", "BA", "GE"
             ]
+            
+            # === CRYPTO (17) ===
+            crypto_symbols = [
+                # Major Pairs (3)
+                "BTCUSDT", "ETHUSDT", "BNBUSDT",
+                
+                # Large Cap Altcoins (4)
+                "SOLUSDT", "ADAUSDT", "XRPUSDT", "DOGEUSDT",
+                
+                # DeFi Tokens (3)
+                "AVAXUSDT", "LINKUSDT", "UNIUSDT",
+                
+                # Layer 2 / Scaling (3)
+                "MATICUSDT", "ARBUSDT", "OPUSDT",
+                
+                # Meme / Community (2)
+                "SHIBUSDT", "PEPEUSDT",
+                
+                # Stablecoins / Trading Pairs (2)
+                "ETHBTC", "BNBBTC"
+            ]
+            
+            if self.enable_multi_market:
+                # Mix stocks and crypto for multi-market training
+                self.symbols = stock_symbols + crypto_symbols
+                print(f"🌍 Multi-market mode: {len(stock_symbols)} stocks + {len(crypto_symbols)} crypto = {len(self.symbols)} total")
+            else:
+                # Stock-only mode
+                self.symbols = stock_symbols
+                print(f"📈 Stock-only mode: {len(stock_symbols)} symbols")
 
 # ============================================================================
 # Data Loading

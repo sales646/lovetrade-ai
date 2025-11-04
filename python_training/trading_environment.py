@@ -38,7 +38,9 @@ class TradingEnvironment:
         max_steps: int = 512,
         initial_balance: float = 100000.0,
         use_augmentation: bool = True,
-        augmentation_noise: float = 0.01  # ±1% noise
+        augmentation_noise: float = 0.01,  # ±1% noise
+        enable_multi_market: bool = True,  # Enable cross-market training
+        crypto_stock_ratio: float = 0.7  # 70% crypto, 30% stock for PPO
     ):
         # Connect to Supabase
         self.supabase_url = supabase_url or os.getenv("SUPABASE_URL")
@@ -57,6 +59,8 @@ class TradingEnvironment:
         self.initial_balance = initial_balance
         self.use_augmentation = use_augmentation
         self.augmentation_noise = augmentation_noise
+        self.enable_multi_market = enable_multi_market
+        self.crypto_stock_ratio = crypto_stock_ratio
         
         # State tracking
         self.current_step = 0
@@ -68,11 +72,19 @@ class TradingEnvironment:
         self.balance = initial_balance
         self.equity_history = [initial_balance]
         
+        # Multi-market: Track symbol statistics for normalization
+        self.symbol_stats: Dict[str, Dict] = {}  # symbol -> {mean, std, atr}
+        self.market_types: Dict[str, int] = {}  # symbol -> 0 (stock) or 1 (crypto)
+        
         # Load historical data (using cache if available)
         self._load_historical_data()
         
+        # Compute symbol statistics for normalization
+        if self.enable_multi_market:
+            self._compute_symbol_stats()
+        
         # Define observation space dimensions
-        self.state_dim = 50
+        self.state_dim = 52  # +2 for market_type and normalized_volatility
         self.action_space_dim = 3  # position_size, stop_loss, take_profit
         
     def _load_historical_data(self):
@@ -129,6 +141,14 @@ class TradingEnvironment:
                 print(f"   Date range: {self.historical_bars[0]['timestamp'][:10]} to {self.historical_bars[-1]['timestamp'][:10]}")
                 print(f"   Symbols: {set(b['symbol'] for b in self.historical_bars)}")
                 
+                # Classify symbols as stock or crypto
+                for symbol in self.symbols:
+                    # Crypto symbols typically end with USDT, BUSD, etc.
+                    is_crypto = symbol.endswith(('USDT', 'BUSD', 'USD', 'BTC', 'ETH')) and len(symbol) > 4
+                    self.market_types[symbol] = 1 if is_crypto else 0
+                
+                print(f"   Market types: {self.market_types}")
+                
                 # Load technical indicators
                 self._load_indicators()
                 
@@ -165,6 +185,49 @@ class TradingEnvironment:
         except Exception as e:
             print(f"⚠️  Could not load indicators: {e}")
             self.indicators = {}
+    
+    def _compute_symbol_stats(self):
+        """
+        Compute per-symbol statistics for normalization:
+        - Mean and std of log-returns
+        - Average ATR for volatility adjustment
+        """
+        print(f"\n📊 Computing symbol statistics for normalization...")
+        
+        for symbol in self.symbols:
+            symbol_bars = [b for b in self.historical_bars if b['symbol'] == symbol]
+            
+            if len(symbol_bars) < 2:
+                continue
+            
+            # Calculate log-returns
+            prices = [float(b['close']) for b in symbol_bars]
+            log_returns = [np.log(prices[i] / prices[i-1]) for i in range(1, len(prices))]
+            
+            # Calculate ATR (average true range) from bars
+            atrs = []
+            for i in range(1, len(symbol_bars)):
+                high = float(symbol_bars[i]['high'])
+                low = float(symbol_bars[i]['low'])
+                prev_close = float(symbol_bars[i-1]['close'])
+                
+                tr = max(
+                    high - low,
+                    abs(high - prev_close),
+                    abs(low - prev_close)
+                )
+                atrs.append(tr)
+            
+            self.symbol_stats[symbol] = {
+                'mean_return': np.mean(log_returns),
+                'std_return': np.std(log_returns) if len(log_returns) > 1 else 0.01,
+                'avg_atr': np.mean(atrs) if len(atrs) > 0 else 1.0,
+                'avg_price': np.mean(prices)
+            }
+            
+            print(f"   {symbol}: mean={self.symbol_stats[symbol]['mean_return']:.6f}, "
+                  f"std={self.symbol_stats[symbol]['std_return']:.6f}, "
+                  f"atr={self.symbol_stats[symbol]['avg_atr']:.4f}")
     
     def _augment_data(self):
         """
@@ -246,8 +309,10 @@ class TradingEnvironment:
     
     def _get_observation(self) -> np.ndarray:
         """
-        Get current market state observation
+        Get current market state observation with multi-market support
         Uses wraparound to loop through data infinitely
+        
+        NEW: Includes market_type encoding and normalized log-returns
         """
         if len(self.historical_bars) == 0:
             return np.zeros(self.state_dim, dtype=np.float32)
@@ -298,11 +363,34 @@ class TradingEnvironment:
             closes = [float(b['close']) for b in recent_bars if b['symbol'] == symbol]
             
             if len(closes) >= 2:
-                # Recent price momentum
-                state[15] = (closes[-1] - closes[0]) / closes[0] if closes[0] > 0 else 0
+                # Recent price momentum (log-return normalized)
+                log_return = np.log(closes[-1] / closes[0]) if closes[0] > 0 else 0
+                
+                # Z-score normalize by symbol statistics
+                if symbol in self.symbol_stats:
+                    mean = self.symbol_stats[symbol]['mean_return']
+                    std = self.symbol_stats[symbol]['std_return']
+                    state[15] = (log_return - mean) / std if std > 0 else 0
+                else:
+                    state[15] = log_return
+                
                 # Volatility (std of returns)
-                returns = [closes[i]/closes[i-1] - 1 for i in range(1, len(closes))]
+                returns = [np.log(closes[i]/closes[i-1]) if closes[i-1] > 0 else 0 
+                          for i in range(1, len(closes))]
                 state[16] = np.std(returns) if len(returns) > 1 else 0
+        
+        # MULTI-MARKET FEATURES (indices 50-51)
+        if self.enable_multi_market:
+            # Market type encoding: 0 = stock, 1 = crypto
+            state[50] = self.market_types.get(symbol, 0)
+            
+            # Normalized volatility (ATR / avg_price)
+            if symbol in self.symbol_stats:
+                avg_atr = self.symbol_stats[symbol]['avg_atr']
+                avg_price = self.symbol_stats[symbol]['avg_price']
+                state[51] = avg_atr / avg_price if avg_price > 0 else 0
+            else:
+                state[51] = 0
         
         return state.astype(np.float32)
     
@@ -333,23 +421,43 @@ class TradingEnvironment:
         if current_bar['symbol'] == next_bar['symbol']:
             current_price = float(current_bar['close'])
             next_price = float(next_bar['close'])
+            symbol = current_bar['symbol']
             
-            # Calculate real price change
-            price_change_pct = (next_price - current_price) / current_price if current_price > 0 else 0
+            # Calculate log-return (better for multi-market)
+            if current_price > 0 and next_price > 0:
+                log_return = np.log(next_price / current_price)
+            else:
+                log_return = 0
             
-            # Calculate reward based on position and actual price movement
-            if abs(position_size) > 0.1:
-                # Trading: reward = position * actual price change * leverage
+            # SHARPE-NORMALIZED REWARD (for multi-market fairness)
+            if self.enable_multi_market and symbol in self.symbol_stats:
+                # Normalize by symbol's volatility
+                std_return = self.symbol_stats[symbol]['std_return']
+                normalized_return = log_return / std_return if std_return > 0 else log_return
+                
+                # Reward = position * normalized return * scale factor
+                base_reward = position_size * normalized_return * 100
+            else:
+                # Fallback: standard percentage return
+                price_change_pct = (next_price - current_price) / current_price
                 base_reward = position_size * price_change_pct * 100
-                
-                # Costs
-                commission = -0.5  # $0.50 per trade
-                slippage = -abs(position_size) * 0.1
-                
+            
+            # Calculate costs (also normalized by ATR)
+            if symbol in self.symbol_stats:
+                avg_atr = self.symbol_stats[symbol]['avg_atr']
+                avg_price = self.symbol_stats[symbol]['avg_price']
+                cost_scale = avg_atr / avg_price if avg_price > 0 else 0.01
+            else:
+                cost_scale = 0.01
+            
+            if abs(position_size) > 0.1:
+                # Trading costs
+                commission = -0.5 * cost_scale
+                slippage = -abs(position_size) * 0.1 * cost_scale
                 reward = base_reward + commission + slippage
             else:
-                # Holding: small penalty
-                reward = -0.1
+                # Holding: small penalty (scaled)
+                reward = -0.1 * cost_scale
         else:
             # Different symbols, no reward
             reward = 0.0
@@ -413,17 +521,22 @@ class TradingEnvironment:
         }
 
 
-def create_trading_env(use_augmentation: bool = True) -> TradingEnvironment:
+def create_trading_env(use_augmentation: bool = True, enable_multi_market: bool = True) -> TradingEnvironment:
     """
     Factory function to create trading environment
     
     Args:
         use_augmentation: If True, applies ±1% noise to create 3x more data
+        enable_multi_market: If True, enables cross-market training features
     
     Returns:
-        TradingEnvironment with real historical data, augmentation, and wraparound
+        TradingEnvironment with real historical data, augmentation, wraparound,
+        and optional multi-market support (stock + crypto)
     """
-    return TradingEnvironment(use_augmentation=use_augmentation)
+    return TradingEnvironment(
+        use_augmentation=use_augmentation,
+        enable_multi_market=enable_multi_market
+    )
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Quick training launcher with correct GPU settings"""
+"""Quick training launcher with multi-market support (stocks + crypto)"""
 
 from distributed_orchestrator import DistributedRLOrchestrator
 
-# Force correct config
+# Multi-market config: 70% crypto, 30% stock for optimal learning
 config = {
     'world_size': 2,
     'envs_per_gpu': 16,  # FORCE 16 envs per GPU
@@ -12,7 +12,7 @@ config = {
     'population_size': 2,
     'exploit_interval': 5,
     'model_type': 'transformer',
-    'state_dim': 50,
+    'state_dim': 52,  # Updated for multi-market features
     'action_dim': 3,
     'd_model': 1024,
     'nhead': 16,
@@ -28,11 +28,18 @@ config = {
     'gae_lambda': 0.95,
     'clip_param': 0.2,
     'ppo_epochs': 4,
+    
+    # Multi-market settings
+    'enable_multi_market': True,
+    'crypto_stock_ratio': 0.7,  # 70% crypto, 30% stock
 }
 
-print("🚀 Starting training with FORCED config:")
+print("🌍 Starting MULTI-MARKET training with FORCED config:")
+print(f"   State dim: {config['state_dim']} (includes market_type + normalized_volatility)")
 print(f"   Envs per GPU: {config['envs_per_gpu']}")
 print(f"   Total envs: {config['world_size'] * config['envs_per_gpu']}")
+print(f"   Multi-market: {config['enable_multi_market']}")
+print(f"   Crypto:Stock ratio: {config['crypto_stock_ratio']*100:.0f}:{(1-config['crypto_stock_ratio'])*100:.0f}")
 
 orchestrator = DistributedRLOrchestrator(config=config)
 orchestrator.setup()
