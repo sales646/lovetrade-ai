@@ -48,7 +48,14 @@ if __name__ == '__main__':
     print(f"   📦 HUGE BATCHES: {config['batch_size']:,} samples")
     print(f"   ⚡ This WILL saturate your A100s!")
     print(f"   Crypto:Stock ratio: 70:30")
+    print("\n" + "="*60)
     
+    print("\n[STEP 1/3] Creating orchestrator...")
     orchestrator = DistributedRLOrchestrator(config=config)
+    
+    print("[STEP 2/3] Running setup (GPU monitor, load balancer, trainer)...")
     orchestrator.setup()
+    print("✅ Setup complete!\n")
+    
+    print("[STEP 3/3] Starting training...")
     orchestrator.train()
