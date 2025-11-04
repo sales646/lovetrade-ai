@@ -1,340 +1,146 @@
-"""
-Distributed Training Orchestrator
-Integrates: Distributed Training, PBT, Transformer Policies, Advanced Rewards
-"""
+"""Distributed Orchestrator with BC+PPO Pipeline and Auto-Discovery"""
 import os
-import sys
-import json
 import torch
-import numpy as np
 from datetime import datetime
-from typing import Dict, Optional
 from pathlib import Path
+from typing import Dict, Optional
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
 load_dotenv()
 
 from distributed_training import DistributedTrainer, check_gpu_availability
 from pbt_scheduler import AdaptivePBTScheduler
 from transformer_policy import TransformerPolicy, LightweightTransformerPolicy
-from advanced_rewards import ProfitOptimizedRewardShaper
-from gpu_monitor import GPUMonitor, LoadBalancer, print_gpu_summary
-from trading_environment import TradingEnvironment, create_trading_env
+from gpu_monitor import GPUMonitor, LoadBalancer
+from trading_environment import create_trading_env
 
 
 class DistributedRLOrchestrator:
-    """
-    Master orchestrator for distributed RL training
-    
-    Coordinates:
-    - 8 GPU workers running PPO
-    - Population-based training (PBT) for hyperparameter search
-    - Transformer policy networks
-    - Advanced profit-optimized reward shaping
-    - GPU monitoring and load balancing
-    """
+    """Master orchestrator with BC→PPO pipeline"""
     
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or self._default_config()
-        
-        # Components
         self.distributed_trainer = None
         self.pbt_scheduler = None
         self.gpu_monitor = None
         self.load_balancer = None
-        
-        # State
-        self.run_id = f"dist_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.run_id = f"pnu_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.checkpoint_dir = Path(f"checkpoints/{self.run_id}")
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
+    
     def _default_config(self) -> Dict:
-        """Default configuration for distributed training"""
+        """A100-optimized configuration"""
         return {
-            # Distributed settings
-            'world_size': 2,  # 2 H100 GPUs
-            'envs_per_gpu': 16,  # 16 per GPU (32 total) - balanced for CPU/GPU
-            'use_bf16': True,
-            
-            # PBT settings
-            'population_size': 2,  # One per GPU
-            'exploit_interval': 5,
-            'pbt_enabled': True,
-            
-            # Model settings - LARGER for H100 utilization
-            'model_type': 'transformer',  # 'transformer', 'lightweight', 'mlp'
-            'state_dim': 50,
-            'action_dim': 3,  # position_size, stop_loss, take_profit
-            'd_model': 1024,  # 4x larger
-            'nhead': 16,  # 2x more attention heads
-            'num_layers': 8,  # 2x deeper
-            'dim_feedforward': 4096,  # 4x d_model for transformer
-            'dropout': 0.1,
-            
-            # Training settings - MASSIVE batches for H100
-            'total_timesteps': 50_000_000,  # 50M timesteps
-            'epochs': 100,
-            'steps_per_rollout': 8192,  # 16x larger rollouts
-            'batch_size': 32768,  # 128x larger batches
-            'learning_rate': 3e-4,
-            'gamma': 0.99,
-            'gae_lambda': 0.95,
-            'clip_param': 0.2,
-            'ppo_epochs': 4,
-            
-            # Reward shaping
-            'reward_shaper': 'profit_optimized',
-            'w_profit': 1.0,
-            'w_sharpe': 2.0,
-            'w_leverage': 0.5,
-            'w_drawdown': -3.0,
-            
-            # Monitoring
-            'log_interval': 10,
-            'save_interval': 50,
-            'eval_interval': 25
+            'world_size': 2, 'envs_per_gpu': 256, 'use_bf16': True, 'use_tf32': True,
+            'pbt_enabled': True, 'population_size': 2, 'exploit_interval': 5,
+            'model_type': 'transformer', 'state_dim': 52, 'action_dim': 3,
+            'd_model': 1024, 'nhead': 16, 'num_layers': 8, 'dim_feedforward': 4096, 'dropout': 0.1,
+            'total_timesteps': 50_000_000, 'epochs': 100, 'steps_per_rollout': 8192, 'batch_size': 32768,
+            'learning_rate': 3e-4, 'gamma': 0.99, 'gae_lambda': 0.95, 'clip_param': 0.2, 'ppo_epochs': 4,
+            'auto_discover_symbols': True, 'symbols': [], 'timeframe': '1Min',
+            'augment_data': True, 'enable_multi_market': True, 'crypto_stock_ratio': 0.7,
+            'bc_pretrain': True, 'bc_epochs': 5000, 'confidence_threshold': 0.6,
+            'log_interval': 10, 'save_interval': 50
         }
     
     def setup(self):
         """Initialize all components"""
-        print("🚀 Setting up Distributed RL Training System")
+        print("\n🚀 PNU Training System Setup")
         print("="*70)
         
-        # 1. Check GPU availability
+        # Auto-discover symbols
+        if self.config.get('auto_discover_symbols', False):
+            from data_discovery import load_discovered_symbols
+            symbols_data = load_discovered_symbols()
+            crypto_ratio = self.config.get('crypto_stock_ratio', 0.7)
+            n_crypto = int(len(symbols_data['crypto']) * crypto_ratio)
+            n_stocks = len(symbols_data['stocks']) - n_crypto
+            self.config['symbols'] = symbols_data['crypto'][:n_crypto] + symbols_data['stocks'][:n_stocks]
+            print(f"✅ Discovered {len(self.config['symbols'])} symbols")
+        
+        # GPU setup
         gpu_info = check_gpu_availability()
-        print(f"\n📊 GPU Info:")
-        print(f"  Available: {gpu_info['available']}")
-        print(f"  Count: {gpu_info['count']}")
+        if gpu_info['available']:
+            self.config['world_size'] = min(self.config['world_size'], gpu_info['count'])
+            print(f"✅ Using {self.config['world_size']} GPUs")
         
-        if not gpu_info['available'] or gpu_info['count'] < self.config['world_size']:
-            print(f"\n⚠️  Warning: Requested {self.config['world_size']} GPUs but only "
-                  f"{gpu_info['count']} available")
-            print("   Adjusting world_size to match available GPUs...")
-            self.config['world_size'] = max(1, gpu_info['count'])
-        
-        # 2. Initialize GPU monitor
+        # Initialize components
         self.gpu_monitor = GPUMonitor(refresh_interval=2.0)
         self.gpu_monitor.start()
         self.load_balancer = LoadBalancer(self.gpu_monitor)
         
-        print_gpu_summary()
-        
-        # 3. Initialize distributed trainer
         self.distributed_trainer = DistributedTrainer(
             world_size=self.config['world_size'],
             use_bf16=self.config['use_bf16'],
             envs_per_gpu=self.config['envs_per_gpu']
         )
         
-        print(f"\n🎯 Distributed Trainer:")
-        print(f"  World size: {self.config['world_size']} GPUs")
-        print(f"  Envs per GPU: {self.config['envs_per_gpu']}")
-        print(f"  Total envs: {self.distributed_trainer.total_envs}")
-        print(f"  BF16 precision: {self.config['use_bf16']}")
-        
-        # 4. Initialize PBT scheduler
         if self.config['pbt_enabled']:
             self.pbt_scheduler = AdaptivePBTScheduler(
                 population_size=self.config['population_size'],
                 exploit_interval=self.config['exploit_interval']
             )
-            
-            # Initialize population with base hyperparams
             base_hyperparams = {
                 'learning_rate': self.config['learning_rate'],
                 'gamma': self.config['gamma'],
-                'gae_lambda': self.config['gae_lambda'],
                 'clip_param': self.config['clip_param'],
-                'batch_size': self.config['batch_size']
             }
             self.pbt_scheduler.initialize_population(base_hyperparams)
-            
-            print(f"\n🧬 PBT Scheduler:")
-            print(f"  Population size: {self.config['population_size']}")
-            print(f"  Exploit interval: {self.config['exploit_interval']}")
         
-        # 5. Save config
-        self._save_config()
-        
-        print("\n✅ Setup complete!")
-        print("="*70 + "\n")
+        print("✅ Setup complete\n")
     
     def train(self):
-        """Run full distributed training with PBT"""
-        print(f"\n🎬 Starting Distributed Training Run: {self.run_id}")
-        print("="*70 + "\n")
+        """BC→PPO training pipeline"""
+        print("🎯 Starting BC→PPO Training Pipeline\n")
         
+        # Phase 1: BC Pretraining
+        if self.config.get('bc_pretrain', True):
+            print("📚 PHASE 1: BC Pretraining")
+            from bc_pretrain import pretrain_bc
+            env = create_trading_env(symbols=self.config['symbols'], enable_multi_market=True, augment=True)
+            
+            from transformer_policy import TransformerPolicy
+            policy = TransformerPolicy(
+                state_dim=self.config['state_dim'], action_dim=self.config['action_dim'],
+                d_model=self.config['d_model'], nhead=self.config['nhead'],
+                num_layers=self.config['num_layers'], dim_feedforward=self.config['dim_feedforward']
+            )
+            
+            bc_results = pretrain_bc(policy=policy, symbols=self.config['symbols'], env=env,
+                                    epochs=self.config.get('bc_epochs', 5000))
+            print(f"✅ BC Complete: {bc_results['final_accuracy']:.2%}\n")
+        
+        # Phase 2: PPO Training
+        print("🎮 PHASE 2: PPO Training")
         try:
             for epoch in range(self.config['epochs']):
-                print(f"\n📅 Epoch {epoch + 1}/{self.config['epochs']}")
-                print("-"*70)
+                print(f"\n📅 Epoch {epoch+1}/{self.config['epochs']}")
                 
-                # Check thermal throttling
-                thermal_status = self.load_balancer.check_thermal_throttling()
-                if thermal_status['is_throttling']:
-                    print("🔥 Warning: Thermal throttling detected!")
-                    for gpu in thermal_status['gpus']:
-                        print(f"   GPU {gpu['gpu_id']}: {gpu['temperature']:.1f}°C")
-                
-                # Get current hyperparams from PBT (if enabled)
-                if self.pbt_scheduler:
-                    population = self.pbt_scheduler.population
-                    hyperparams_per_worker = {p.id: p.hyperparams for p in population}
-                else:
-                    hyperparams_per_worker = {0: self.config}
-                
-                # Create model class based on config
-                model_class = self._get_model_class()
-                
-                # Create environment factory
-                env_fn = self._create_env_factory()
-                
-                # Launch distributed training for this epoch
-                print(f"🚀 Launching {self.config['world_size']} workers...")
-                epoch_config = self.config.copy()
-                epoch_config['epochs'] = 1  # One epoch per iteration
+                env_fn = lambda: create_trading_env(symbols=self.config['symbols'], 
+                                                   enable_multi_market=True, phase="train")
                 
                 metrics = self.distributed_trainer.launch(
-                    config=epoch_config,
-                    model_class=model_class,
-                    env_fn=env_fn
+                    config=self.config, model_class=TransformerPolicy, env_fn=env_fn
                 )
                 
-                # Process metrics
-                self._process_metrics(epoch, metrics)
-                
-                # PBT step (exploit & explore)
-                if self.pbt_scheduler and epoch % self.pbt_scheduler.exploit_interval == 0:
-                    print("\n🧬 PBT: Exploit & Explore phase")
-                    
-                    # Collect performances
-                    performances = {
-                        m['rank']: m['metrics']['mean_reward']
-                        for m in metrics if 'metrics' in m
-                    }
-                    
-                    self.pbt_scheduler.step(performances)
-                    
-                    best = self.pbt_scheduler.get_best()
-                    print(f"   Best performer: Population {best.id} "
-                          f"(reward={best.performance:.2f})")
-                    print(f"   LR={best.hyperparams['learning_rate']:.6f}, "
-                          f"Gamma={best.hyperparams['gamma']:.4f}")
-                
-                # Checkpointing
-                if (epoch + 1) % self.config['save_interval'] == 0:
-                    self._save_checkpoint(epoch)
-                
-                # GPU stats
-                if (epoch + 1) % self.config['log_interval'] == 0:
-                    self._log_gpu_stats()
+                if (epoch + 1) % 10 == 0:
+                    print(f"💾 Saving checkpoint...")
+                    torch.save({'epoch': epoch, 'config': self.config}, 
+                              self.checkpoint_dir / f"epoch_{epoch+1}.pt")
                 
         except KeyboardInterrupt:
-            print("\n\n⚠️  Training interrupted by user")
-            self._save_checkpoint(epoch, prefix="interrupted")
-        
-        except Exception as e:
-            print(f"\n\n❌ Training error: {e}")
-            import traceback
-            traceback.print_exc()
-        
+            print("\n⚠️  Interrupted")
         finally:
             self.cleanup()
     
-    def _get_model_class(self):
-        """Get model class based on config"""
-        model_type = self.config.get('model_type', 'transformer')
-        
-        if model_type == 'transformer':
-            return TransformerPolicy
-        elif model_type == 'lightweight':
-            return LightweightTransformerPolicy
-        else:
-            raise ValueError(f"Unknown model type: {model_type}")
-    
-    def _create_env_factory(self):
-        """Create environment factory function"""
-        # Return the real trading environment factory (picklable)
-        return create_trading_env
-    
-    def _process_metrics(self, epoch: int, metrics: list):
-        """Process and log metrics"""
-        if not metrics:
-            return
-        
-        # Aggregate metrics across workers
-        total_loss = sum(m['metrics']['loss'] for m in metrics if 'metrics' in m)
-        total_reward = sum(m['metrics']['mean_reward'] for m in metrics if 'metrics' in m)
-        n_workers = len([m for m in metrics if 'metrics' in m])
-        
-        if n_workers > 0:
-            avg_loss = total_loss / n_workers
-            avg_reward = total_reward / n_workers
-            
-            print(f"\n📊 Epoch {epoch} Results:")
-            print(f"   Avg Loss: {avg_loss:.4f}")
-            print(f"   Avg Reward: {avg_reward:.2f}")
-            
-            # Save metrics
-            self._save_metrics(epoch, {
-                'avg_loss': avg_loss,
-                'avg_reward': avg_reward,
-                'n_workers': n_workers
-            })
-    
-    def _save_metrics(self, epoch: int, metrics: Dict):
-        """Save metrics to file"""
-        metrics_file = self.checkpoint_dir / "metrics.jsonl"
-        with open(metrics_file, 'a') as f:
-            f.write(json.dumps({
-                'epoch': epoch,
-                'timestamp': datetime.now().isoformat(),
-                **metrics
-            }) + '\n')
-    
-    def _save_checkpoint(self, epoch: int, prefix: str = ""):
-        """Save training checkpoint"""
-        checkpoint_name = f"{prefix}checkpoint_epoch_{epoch}.pt" if prefix else f"checkpoint_epoch_{epoch}.pt"
-        checkpoint_path = self.checkpoint_dir / checkpoint_name
-        
-        checkpoint = {
-            'epoch': epoch,
-            'run_id': self.run_id,
-            'config': self.config,
-            'pbt_state': self.pbt_scheduler.__dict__ if self.pbt_scheduler else None
-        }
-        
-        torch.save(checkpoint, checkpoint_path)
-        print(f"💾 Saved checkpoint: {checkpoint_path}")
-    
-    def _save_config(self):
-        """Save configuration"""
-        config_file = self.checkpoint_dir / "config.json"
-        with open(config_file, 'w') as f:
-            json.dump(self.config, f, indent=2)
-    
-    def _log_gpu_stats(self):
-        """Log GPU statistics"""
-        summary = self.gpu_monitor.get_summary()
-        if summary.get('available'):
-            print(f"\n🎮 GPU Stats:")
-            print(f"   Avg Utilization: {summary['avg_utilization']:.1f}%")
-            print(f"   Avg Memory: {summary['avg_memory_used']:.1f} GB")
-            print(f"   Avg Temp: {summary['avg_temperature']:.1f}°C")
-    
     def cleanup(self):
-        """Cleanup resources"""
-        print("\n🧹 Cleaning up...")
+        """Cleanup"""
         if self.gpu_monitor:
             self.gpu_monitor.stop()
-        print("✅ Cleanup complete")
 
 
 def main():
-    """Main entry point"""
-    # Use None to get full default config
-    orchestrator = DistributedRLOrchestrator(config=None)
+    orchestrator = DistributedRLOrchestrator()
     orchestrator.setup()
     orchestrator.train()
 
