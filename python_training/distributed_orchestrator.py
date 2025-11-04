@@ -13,6 +13,7 @@ from pbt_scheduler import AdaptivePBTScheduler
 from transformer_policy import TransformerPolicy, LightweightTransformerPolicy
 from gpu_monitor import GPUMonitor, LoadBalancer
 from trading_environment import create_trading_env
+from s3_data_loader import S3MarketDataLoader
 
 
 # Module-level function for multiprocessing pickle compatibility
@@ -58,15 +59,41 @@ class DistributedRLOrchestrator:
         print("\n🚀 PNU Training System Setup")
         print("="*70)
         
-        # Auto-discover symbols
-        if self.config.get('auto_discover_symbols', False):
-            from data_discovery import load_discovered_symbols
-            symbols_data = load_discovered_symbols()
-            crypto_ratio = self.config.get('crypto_stock_ratio', 0.7)
-            n_crypto = int(len(symbols_data['crypto']) * crypto_ratio)
-            n_stocks = len(symbols_data['stocks']) - n_crypto
-            self.config['symbols'] = symbols_data['crypto'][:n_crypto] + symbols_data['stocks'][:n_stocks]
-            print(f"✅ Discovered {len(self.config['symbols'])} symbols")
+        # Load MASSIVE S3 data instead of tiny Supabase data
+        print("📥 Loading market data from Polygon S3...")
+        self.s3_loader = S3MarketDataLoader(cache_size_gb=20.0)
+        
+        # Load a full year of data (stocks + crypto)
+        print("📊 Loading STOCKS (2023-2024)...")
+        symbol_data_stocks = self.s3_loader.load_date_range(
+            start_date="2023-01-03",
+            end_date="2024-01-31",
+            asset_type="stocks",
+            max_workers=32
+        )
+        
+        print("📊 Loading CRYPTO (2023-2024)...")
+        symbol_data_crypto = self.s3_loader.load_date_range(
+            start_date="2023-01-01",
+            end_date="2024-01-31",
+            asset_type="crypto",
+            max_workers=32
+        )
+        
+        # Combine
+        symbol_data = {**symbol_data_stocks, **symbol_data_crypto}
+        
+        # Get diverse symbols with enough data
+        n_total = 500
+        crypto_ratio = self.config.get('crypto_stock_ratio', 0.7)
+        n_crypto = int(n_total * crypto_ratio)
+        n_stocks = n_total - n_crypto
+        
+        stocks = self.s3_loader.get_random_symbols(symbol_data_stocks, n_stocks, min_bars=2000)
+        crypto = self.s3_loader.get_random_symbols(symbol_data_crypto, n_crypto, min_bars=2000)
+        self.config['symbols'] = stocks + crypto
+        
+        print(f"📋 Loaded {len(self.config['symbols'])} symbols ({len(stocks)} stocks, {len(crypto)} crypto)")
         
         # GPU setup
         gpu_info = check_gpu_availability()
