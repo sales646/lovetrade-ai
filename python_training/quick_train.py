@@ -4,7 +4,7 @@
 from distributed_orchestrator import DistributedRLOrchestrator
 
 config = {
-    'world_size': 2,
+    'world_size': 4,  # Use all 4 A100 GPUs
     'envs_per_gpu': 256,  # A100 optimized
     'use_bf16': True,
     'use_tf32': True,
