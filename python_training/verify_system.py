@@ -73,7 +73,7 @@ if gpu_info['available']:
 # Test environment creation
 print("\n✓ Step 5: Testing environment creation...")
 try:
-    env = create_trading_env(use_augmentation=False)
+    env = create_trading_env(augment=False)
     state = env.reset()
     print(f"  ✓ Environment created")
     print(f"    State shape: {state.shape}")
