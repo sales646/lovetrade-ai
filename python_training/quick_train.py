@@ -39,12 +39,13 @@ config = {
     'augment_data': True,
 }
 
-print("🧠 PNU Training System")
-print(f"   BC Pretraining → PPO Reinforcement Learning")
-print(f"   Auto-discovering all symbols...")
-print(f"   A100 optimized: {config['envs_per_gpu']} envs/GPU")
-print(f"   Crypto:Stock ratio: 70:30")
-
-orchestrator = DistributedRLOrchestrator(config=config)
-orchestrator.setup()
-orchestrator.train()
+if __name__ == '__main__':
+    print("🧠 PNU Training System")
+    print(f"   BC Pretraining → PPO Reinforcement Learning")
+    print(f"   Auto-discovering all symbols...")
+    print(f"   A100 optimized: {config['envs_per_gpu']} envs/GPU")
+    print(f"   Crypto:Stock ratio: 70:30")
+    
+    orchestrator = DistributedRLOrchestrator(config=config)
+    orchestrator.setup()
+    orchestrator.train()
