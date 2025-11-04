@@ -15,12 +15,13 @@ s3_client = boto3.client(
 )
 
 bucket = os.getenv("POLYGON_S3_BUCKET", "flatfiles")
-year = "2024"  # Check 2024 data
+year = "2024"
+month = "01"  # January 2024
 
-print(f"📊 Checking symbols in {year}...\n")
+print(f"📊 Checking symbols in {year}/{month}...\n")
 
-# Check stocks
-prefix = f"us_stocks_sip/minute_aggs_v1/{year}/"
+# Check stocks - need to go into month folder
+prefix = f"us_stocks_sip/minute_aggs_v1/{year}/{month}/"
 response = s3_client.list_objects_v2(
     Bucket=bucket,
     Prefix=prefix,
@@ -30,14 +31,14 @@ response = s3_client.list_objects_v2(
 
 if 'CommonPrefixes' in response:
     symbols = [p['Prefix'].split('/')[-2] for p in response['CommonPrefixes']]
-    print(f"✅ Found {len(symbols)} stock symbols in {year}")
-    print(f"First 20: {', '.join(symbols[:20])}")
+    print(f"✅ Found {len(symbols)} stock symbols in {year}/{month}")
+    print(f"First 50: {', '.join(symbols[:50])}")
 else:
     print("❌ No stock symbols found")
 
-# Check crypto
-print(f"\n📊 Checking crypto...\n")
-prefix = f"global_crypto/minute_aggs_v1/{year}/"
+# Check crypto - need to go into month folder
+print(f"\n📊 Checking crypto in {year}/{month}...\n")
+prefix = f"global_crypto/minute_aggs_v1/{year}/{month}/"
 response = s3_client.list_objects_v2(
     Bucket=bucket,
     Prefix=prefix,
@@ -47,7 +48,7 @@ response = s3_client.list_objects_v2(
 
 if 'CommonPrefixes' in response:
     symbols = [p['Prefix'].split('/')[-2] for p in response['CommonPrefixes']]
-    print(f"✅ Found {len(symbols)} crypto pairs in {year}")
-    print(f"First 20: {', '.join(symbols[:20])}")
+    print(f"✅ Found {len(symbols)} crypto pairs in {year}/{month}")
+    print(f"First 50: {', '.join(symbols[:50])}")
 else:
     print("❌ No crypto symbols found")

@@ -5,7 +5,7 @@ from distributed_orchestrator import DistributedRLOrchestrator
 
 config = {
     'world_size': 4,  # Use all 4 A100 GPUs
-    'envs_per_gpu': 256,  # A100 optimized
+    'envs_per_gpu': 2048,  # Massive parallelization for A100s - 8192 total environments
     'use_bf16': True,
     'use_tf32': True,
     'pbt_enabled': True,
@@ -22,7 +22,7 @@ config = {
     'total_timesteps': 50_000_000,
     'epochs': 100,
     'steps_per_rollout': 8192,
-    'batch_size': 32768,
+    'batch_size': 65536,  # Increased for larger env count
     'learning_rate': 3e-4,
     'gamma': 0.99,
     'gae_lambda': 0.95,
@@ -40,10 +40,11 @@ config = {
 }
 
 if __name__ == '__main__':
-    print("🧠 PNU Training System")
+    print("🧠 PNU Training System - MAXIMUM SCALE")
     print(f"   BC Pretraining → PPO Reinforcement Learning")
     print(f"   Auto-discovering all symbols...")
-    print(f"   A100 optimized: {config['envs_per_gpu']} envs/GPU")
+    print(f"   🚀 A100 BEAST MODE: {config['envs_per_gpu']} envs/GPU")
+    print(f"   📊 Total environments: {config['world_size'] * config['envs_per_gpu']}")
     print(f"   Crypto:Stock ratio: 70:30")
     
     orchestrator = DistributedRLOrchestrator(config=config)
