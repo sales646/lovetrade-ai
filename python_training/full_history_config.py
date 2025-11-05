@@ -1,7 +1,6 @@
 """Central configuration for full-history data preparation and training."""
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -35,7 +34,6 @@ class FullHistoryConfig:
     max_bars_per_symbol: Optional[int] = None
 
     cache_dir: Path = field(default_factory=lambda: Path("./cache"))
-    cache_version: str = "v1"
     use_cache: bool = True
 
     window_size: int = 4096
@@ -50,35 +48,9 @@ class FullHistoryConfig:
     lookback_sanity: int = 1000
 
     timeframe: str = "1m"
-    sources: Tuple[str, ...] = ("polygon", "binance", "yahoo")
-    coverage_threshold: float = 0.95
-
-    max_retries: int = 5
-    initial_backoff: float = 1.0
-    max_backoff: float = 30.0
-
-    force_full_prep: bool = field(
-        default_factory=lambda: os.getenv("FORCE_FULL_PREP", "").lower() in {"1", "true", "yes"}
-    )
-
-    def __post_init__(self) -> None:
-        start_env = os.getenv("START_DATE") or os.getenv("FULL_HISTORY_START_DATE")
-        end_env = os.getenv("END_DATE") or os.getenv("FULL_HISTORY_END_DATE")
-        cache_dir_env = os.getenv("CACHE_DIR") or os.getenv("FULL_HISTORY_CACHE_DIR")
-        cache_version_env = os.getenv("CACHE_VERSION") or os.getenv("FULL_HISTORY_CACHE_VERSION")
-        if start_env:
-            self.start = start_env
-        if end_env:
-            self.end = end_env
-        if cache_dir_env:
-            self.cache_dir = Path(cache_dir_env)
-        if cache_version_env:
-            self.cache_version = cache_version_env
-        self.resolve_dates()
 
     def resolve_dates(self) -> None:
         """Resolve placeholders in ranges and end date."""
-        self.start = _resolve_today(self.start)
         self.end = _resolve_today(self.end)
         self.train_range = _resolve_range(self.train_range)
         self.val_range = _resolve_range(self.val_range)
@@ -86,10 +58,7 @@ class FullHistoryConfig:
 
     @property
     def cache_path(self) -> Path:
-        base = Path(self.cache_dir)
-        if self.cache_version:
-            return base / self.cache_version
-        return base
+        return Path(self.cache_dir)
 
     def ensure_cache_dir(self) -> None:
         self.cache_path.mkdir(parents=True, exist_ok=True)
