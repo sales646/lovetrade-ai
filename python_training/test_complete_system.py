@@ -142,16 +142,18 @@ try:
         end_date=end_date.strftime("%Y-%m-%d")
     )
     
-    # Just test US stocks (faster)
-    print("  Fetching sample US stocks...")
-    us_data = fetcher.fetch_us_stocks(limit=3)
+    # Test fetching all data sources
+    print("  Fetching from all sources...")
+    market_data, news_data = fetcher.fetch_all()
     
-    if us_data and len(us_data) > 0:
-        print(f"  ✅ Fetched data for {len(us_data)} symbols")
-        for symbol, df in us_data.items():
+    if market_data and len(market_data) > 0:
+        print(f"  ✅ Fetched data for {len(market_data)} symbols")
+        for symbol, df in list(market_data.items())[:5]:  # Show first 5
             print(f"     {symbol}: {len(df)} bars")
+        us_data = market_data  # Use for next test
     else:
         print(f"  ⚠️  No data fetched (check date range)")
+        us_data = {}
     
 except Exception as e:
     print(f"  ❌ Data fetcher error: {e}")
