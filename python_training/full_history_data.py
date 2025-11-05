@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -168,7 +168,7 @@ class FullHistoryDataManager:
             trading_days = trading_days.tz_convert("UTC").tz_localize(None)
 
         if not self.config.sanity_mode and len(trading_days) < 1000:
-            raise RuntimeError("Range resolution bug: expected ≥1500 trading days.")
+            raise RuntimeError("Range resolution bug — expected ≥1500 trading days")
 
         return trading_days
 
@@ -176,13 +176,12 @@ class FullHistoryDataManager:
         start_str = self._start_dt.date().isoformat()
         end_str = self._end_dt.date().isoformat()
         day_strings = [day.strftime("%Y-%m-%d") for day in self._trading_days]
-        first_days = ", ".join(day_strings[:3]) if day_strings else "n/a"
-        last_days = ", ".join(day_strings[-3:]) if day_strings else "n/a"
-        print(
-            f"start_date={start_str}, end_date={end_str}, calendar=XNYS, "
-            f"trading_days={len(self._trading_days)}, first_days=[{first_days}], "
-            f"last_days=[{last_days}]"
-        )
+        first_days = day_strings[:5]
+        last_days = day_strings[-5:]
+        print(f"START_DATE={start_str}, END_DATE={end_str}, calendar=XNYS")
+        print(f"🗓️ Trading days: {len(self._trading_days)}")
+        print(f"First 5: {first_days}")
+        print(f"Last 5: {last_days}")
 
     def _fetch_all_symbols(self, tickers: Sequence[str]) -> Dict[str, pd.DataFrame]:
         """Fetch full history for every ticker with a progress bar."""
@@ -195,25 +194,29 @@ class FullHistoryDataManager:
         self._coverage_stats = {}
 
         print()
-        with tqdm(total=len(tickers), desc="FETCH FULL HISTORY", unit="symbol") as pbar:
-            for symbol in tickers:
-                df, source, files_used = self._fetch_symbol(symbol)
-                if df is None or df.empty:
-                    pbar.update(1)
-                    continue
+        trading_day_total = max(1, len(self._trading_days))
 
-                cleaned = self._clean_dataframe(df)
-                if cleaned.empty:
-                    pbar.update(1)
+        with tqdm(total=trading_day_total, desc="FETCH FULL HISTORY", unit="day") as pbar:
+            for symbol in tickers:
+                pbar.reset(total=trading_day_total)
+                pbar.set_description(f"FETCH {symbol}")
+
+                progress_hook = self._progress_hook_for_bar(pbar)
+                df, source, files_used = self._fetch_symbol(symbol, progress_hook=progress_hook)
+
+                if pbar.n < pbar.total:
+                    pbar.update(pbar.total - pbar.n)
+
+                if df is None or df.empty:
                     continue
 
                 self._files_processed += files_used
-                total_bars += len(cleaned)
-                market_data[symbol] = cleaned
-                self._persist_full_symbol(symbol, cleaned)
+                total_bars += len(df)
+                market_data[symbol] = df
+                self._persist_full_symbol(symbol, df)
                 self._symbol_sources[symbol] = source or "unknown"
 
-                stats = self._compute_coverage_stats(symbol, cleaned)
+                stats = self._compute_coverage_stats(symbol, df)
                 self._coverage_stats[symbol] = stats
                 if (
                     not self.config.sanity_mode
@@ -224,33 +227,46 @@ class FullHistoryDataManager:
                 ):
                     coverage_failures.append((symbol, stats))
 
-                pbar.update(1)
+                pbar.update(0)
+            pbar.set_description("FETCH FULL HISTORY")
 
         if not market_data:
             raise RuntimeError("No market data available after fetching")
 
         self._print_coverage_summary(market_data)
         print(
-            f"✅ FETCH DONE — {self._files_processed} files, {total_bars:,} bars, "
+            f"✅ FETCH DONE — files={self._files_processed}, bars={total_bars:,}, "
             f"days={len(self._trading_days)}"
         )
         self._persist_sources()
 
         if coverage_failures:
-            failure_lines = []
+            print("\nCoverage validation failed:")
             for symbol, stats in coverage_failures:
-                failure_lines.append(
+                print(
                     f"  {symbol}: {stats['coverage_pct']:.2f}% coverage, "
                     f"unique_days={int(stats['unique_days'])}"
                 )
-            failure_msg = "\n".join(["Coverage validation failed:"] + failure_lines + [
-                "Hint: Check START/END, NYSE calendar, S3 day iteration, Polygon cursor, Binance startTime advancement."
-            ])
-            raise RuntimeError(failure_msg)
+            raise RuntimeError(
+                "Coverage too low — check NYSE days iteration, S3 loop, or Yahoo merge"
+            )
 
         return market_data
 
-    def _fetch_symbol(self, symbol: str) -> Tuple[Optional[pd.DataFrame], Optional[str], int]:
+    def _progress_hook_for_bar(self, bar: tqdm) -> Callable[[float], None]:
+        def hook(increment: float) -> None:
+            if increment <= 0:
+                return
+            remaining = max(bar.total - bar.n, 0)
+            bar.update(min(increment, remaining))
+
+        return hook
+
+    def _fetch_symbol(
+        self,
+        symbol: str,
+        progress_hook: Optional[Callable[[float], None]] = None,
+    ) -> Tuple[Optional[pd.DataFrame], Optional[str], int]:
         """Fetch a symbol from configured sources with fallback."""
 
         is_crypto = symbol in self.crypto or symbol.upper().endswith("USDT")
@@ -277,30 +293,47 @@ class FullHistoryDataManager:
 
         for source in ordered_sources:
             if source == "polygon":
-                df, files = self._fetch_polygon_symbol(symbol)
+                df, files = self._fetch_polygon_symbol(symbol, progress_hook=progress_hook)
             elif source == "binance":
-                df, files = self._fetch_binance_symbol(symbol)
+                df, files = self._fetch_binance_symbol(symbol, progress_hook=progress_hook)
             elif source == "yahoo":
                 df, files = self._fetch_yahoo_symbol(symbol)
             else:
                 continue
 
             if df is not None and not df.empty:
-                df["source"] = source
-                return df, source, files
+                cleaned = self._clean_dataframe(df)
+                if source == "polygon":
+                    yahoo_df, yahoo_files = self._fetch_yahoo_symbol(symbol)
+                    if yahoo_df is not None and not yahoo_df.empty:
+                        cleaned = self._merge_polygon_with_yahoo(cleaned, yahoo_df, symbol)
+                        files += yahoo_files
+                        source = "polygon+yahoo"
+                return cleaned, source, files
 
         print(f"⚠️  No data retrieved for {symbol} from any source")
         return None, None, 0
 
-    def _fetch_polygon_symbol(self, symbol: str) -> Tuple[Optional[pd.DataFrame], int]:
-        df, files = self._fetch_polygon_s3(symbol)
+    def _fetch_polygon_symbol(
+        self,
+        symbol: str,
+        progress_hook: Optional[Callable[[float], None]] = None,
+    ) -> Tuple[Optional[pd.DataFrame], int]:
+        df, files = self._fetch_polygon_s3(symbol, progress_hook=progress_hook)
         if df is not None and not df.empty:
             return df, files
+
+        if progress_hook is not None:
+            progress_hook(len(self._trading_days) or 0)
 
         api_df, api_files = self._fetch_polygon_api(symbol)
         return api_df, api_files
 
-    def _fetch_polygon_s3(self, symbol: str) -> Tuple[Optional[pd.DataFrame], int]:
+    def _fetch_polygon_s3(
+        self,
+        symbol: str,
+        progress_hook: Optional[Callable[[float], None]] = None,
+    ) -> Tuple[Optional[pd.DataFrame], int]:
         client = self._get_s3_client()
         if client is None or self._trading_days.empty:
             return None, 0
@@ -352,6 +385,9 @@ class FullHistoryDataManager:
 
             if self.config.sanity_mode and frames:
                 break
+
+            if progress_hook is not None:
+                progress_hook(1)
 
         if not frames:
             return None, files
@@ -422,7 +458,7 @@ class FullHistoryDataManager:
             files += 1
             page += 1
 
-            if not self.config.paginate or not cursor or self.config.sanity_mode:
+            if not cursor or self.config.sanity_mode:
                 break
 
         if not frames:
@@ -458,7 +494,11 @@ class FullHistoryDataManager:
                 keys.append(entry["Key"])
         return keys
 
-    def _fetch_binance_symbol(self, symbol: str) -> Tuple[Optional[pd.DataFrame], int]:
+    def _fetch_binance_symbol(
+        self,
+        symbol: str,
+        progress_hook: Optional[Callable[[float], None]] = None,
+    ) -> Tuple[Optional[pd.DataFrame], int]:
         limit = min(self.config.chunk_size, 1000)
         start_ms = int(self._start_dt.timestamp() * 1000)
         end_ms = int(self._end_dt.timestamp() * 1000)
@@ -528,11 +568,14 @@ class FullHistoryDataManager:
             page += 1
             start_ms = last_close_ms + 1
 
-            if not self.config.paginate or self.config.sanity_mode:
+            if self.config.sanity_mode:
                 break
 
         if not frames:
             return None, files
+
+        if progress_hook is not None:
+            progress_hook(len(self._trading_days) or 0)
 
         return pd.concat(frames, ignore_index=True), files
 
@@ -560,6 +603,39 @@ class FullHistoryDataManager:
         )
         df = df.reset_index().rename(columns={"Datetime": "timestamp"})
         return df, 1
+
+    def _merge_polygon_with_yahoo(
+        self,
+        polygon_df: pd.DataFrame,
+        yahoo_raw: pd.DataFrame,
+        symbol: str,
+    ) -> pd.DataFrame:
+        yahoo_clean = self._clean_dataframe(yahoo_raw)
+        if yahoo_clean.empty:
+            return polygon_df
+
+        polygon_df = polygon_df.sort_values("timestamp").reset_index(drop=True)
+        yahoo_clean = yahoo_clean.sort_values("timestamp").reset_index(drop=True)
+
+        polygon_df = polygon_df.assign(_priority=0)
+        yahoo_clean = yahoo_clean.assign(_priority=1)
+
+        combined = pd.concat([polygon_df, yahoo_clean], ignore_index=True)
+        combined = combined.sort_values(["timestamp", "_priority"])
+        combined = combined.drop_duplicates("timestamp", keep="first")
+        combined = combined.drop(columns="_priority")
+
+        polygon_days = polygon_df["timestamp"].dt.normalize().nunique()
+        polygon_rows = len(polygon_df)
+        combined_days = combined["timestamp"].dt.normalize().nunique()
+        combined_rows = len(combined)
+
+        if combined_rows < polygon_rows or combined_days < polygon_days:
+            raise RuntimeError(
+                f"Yahoo merge reduced coverage for {symbol} — check NYSE days iteration, S3 loop, or Yahoo merge"
+            )
+
+        return combined
 
     def _request_with_backoff(self, method: str, url: str, **kwargs) -> requests.Response:
         delay = self.config.initial_backoff
