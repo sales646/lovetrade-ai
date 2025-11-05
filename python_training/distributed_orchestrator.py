@@ -64,9 +64,9 @@ class DistributedRLOrchestrator:
         from production_data_fetcher import ProductionDataFetcher
         from datetime import datetime, timedelta
         
-        # Get 90 days of recent data
+        # Get maximum historical data (3 years for stocks, 1 year for crypto)
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=90)
+        start_date = datetime(2021, 1, 1)  # Go back to 2021 for maximum data
         
         fetcher = ProductionDataFetcher(
             start_date=start_date.strftime("%Y-%m-%d"),

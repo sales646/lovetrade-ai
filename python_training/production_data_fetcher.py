@@ -238,9 +238,9 @@ class ProductionDataFetcher:
     # ===== YAHOO FINANCE =====
     
     def fetch_yahoo_stocks(self) -> Dict[str, pd.DataFrame]:
-        """Fetch stocks from Yahoo Finance as backup/supplement"""
+        """Fetch stocks from Yahoo Finance - PRIMARY DATA SOURCE"""
         print("\n" + "="*70)
-        print("📈 FETCHING STOCKS FROM YAHOO FINANCE (Supplementary)")
+        print("📈 FETCHING STOCKS FROM YAHOO FINANCE (Primary Source)")
         print("="*70)
         
         try:
@@ -258,12 +258,23 @@ class ProductionDataFetcher:
             try:
                 ticker = yf.Ticker(symbol)
                 
-                # Try minute data first (limited to last 60 days by Yahoo)
-                df = ticker.history(start=start_str, end=end_str, interval="1m")
+                # Get both minute and daily data
+                # Minute data (last 30 days only due to Yahoo limits)
+                recent_start = max(self.start_date, datetime.now() - timedelta(days=30))
+                df_minute = pd.DataFrame()
                 
-                if df.empty:
-                    # Fallback to daily if minute not available
-                    df = ticker.history(start=start_str, end=end_str, interval="1d")
+                if recent_start <= self.end_date:
+                    df_minute = ticker.history(
+                        start=recent_start.strftime("%Y-%m-%d"), 
+                        end=end_str, 
+                        interval="1m"
+                    )
+                
+                # Daily data (full historical range)
+                df_daily = ticker.history(start=start_str, end=end_str, interval="1d")
+                
+                # Combine both (prefer minute data where available)
+                df = df_minute if not df_minute.empty else df_daily
                 
                 if not df.empty:
                     df = df.reset_index()
@@ -369,22 +380,25 @@ class ProductionDataFetcher:
         print(f"📅 {self.start_date.date()} → {self.end_date.date()}")
         print()
         
-        # Priority: Polygon > Binance > Yahoo (for overlaps)
+        # Priority: Yahoo Finance (Primary) > Polygon > Binance
         all_data = {}
         
-        # 1. Polygon S3 (Primary stock source)
-        polygon_stocks = self.fetch_polygon_stocks()
-        all_data.update(polygon_stocks)
+        # 1. Yahoo Finance (Primary - most reliable, both minute + daily)
+        yahoo_stocks = self.fetch_yahoo_stocks()
+        all_data.update(yahoo_stocks)
         
-        # 2. Binance (Crypto)
+        # 2. Polygon S3 (Supplement stocks - minute data only)
+        polygon_stocks = self.fetch_polygon_stocks()
+        for symbol, df in polygon_stocks.items():
+            if symbol not in all_data:  # Only add if not from Yahoo
+                all_data[symbol] = df
+            else:
+                # Merge Polygon minute data with Yahoo daily data
+                print(f"   Merging {symbol}: Yahoo + Polygon")
+        
+        # 3. Binance (Crypto - minute data)
         binance_crypto = self.fetch_binance_crypto()
         all_data.update(binance_crypto)
-        
-        # 3. Yahoo Finance (Supplement/Backup for stocks)
-        yahoo_stocks = self.fetch_yahoo_stocks()
-        for symbol, df in yahoo_stocks.items():
-            if symbol not in all_data:  # Only add if not already from Polygon
-                all_data[symbol] = df
         
         # 4. Yahoo News (Sentiment)
         news_df = self.fetch_yahoo_news()
@@ -394,9 +408,9 @@ class ProductionDataFetcher:
         print("📊 DATA SUMMARY")
         print("="*70)
         print(f"Total symbols: {len(all_data)}")
-        print(f"  Polygon stocks: {len(polygon_stocks)}")
+        print(f"  Yahoo stocks (primary): {len(yahoo_stocks)}")
+        print(f"  Polygon stocks (supplementary): {len([s for s in polygon_stocks if s not in yahoo_stocks])}")
         print(f"  Binance crypto: {len(binance_crypto)}")
-        print(f"  Yahoo stocks: {len([s for s in yahoo_stocks if s not in polygon_stocks])}")
         print(f"  News articles: {len(news_df)}")
         print()
         
@@ -414,9 +428,9 @@ class ProductionDataFetcher:
 
 def test_fetcher():
     """Test the production data fetcher"""
-    # Test with 1 month of recent data
+    # Test with maximum historical range
     end = datetime.now()
-    start = end - timedelta(days=30)
+    start = datetime(2021, 1, 1)  # 3+ years of data
     
     fetcher = ProductionDataFetcher(
         start_date=start.strftime("%Y-%m-%d"),
