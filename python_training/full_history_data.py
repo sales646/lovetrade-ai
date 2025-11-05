@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import os
 import random
+import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -95,6 +96,10 @@ class FullHistoryDataManager:
             for path in [self._sentinel, self._manifest_path, self._feature_path, self._source_path]:
                 if path.exists():
                     path.unlink()
+            for symbol in set(self.stocks + self.crypto):
+                cache_root = self._symbol_cache_dir(symbol)
+                if cache_root.exists():
+                    shutil.rmtree(cache_root, ignore_errors=True)
 
         self._start_dt = self.config.resolved_datetime(self.config.start)
         self._end_dt = self.config.resolved_datetime(self.config.end)
@@ -110,37 +115,44 @@ class FullHistoryDataManager:
                 self._start_dt + timedelta(minutes=self.config.lookback_sanity),
             )
 
-        self._trading_days = self._build_trading_calendar()
-        self._print_range_banner()
+        original_use_cache = self.config.use_cache
+        if force:
+            self.config.use_cache = False
 
-        if not force and self._can_short_circuit():
-            manifest = pd.read_parquet(self._manifest_path)
-            market_data = self._load_cached_symbols(manifest)
-            feature_columns = self._load_feature_columns()
-            self._symbol_sources = self._load_sources()
-            if feature_columns:
-                for df in market_data.values():
-                    missing = [col for col in feature_columns if col not in df.columns]
-                    for col in missing:
-                        df[col] = np.nan
+        try:
+            self._trading_days = self._build_trading_calendar()
+            self._print_range_banner()
+
+            if not force and self._can_short_circuit():
+                manifest = pd.read_parquet(self._manifest_path)
+                market_data = self._load_cached_symbols(manifest)
+                feature_columns = self._load_feature_columns()
+                self._symbol_sources = self._load_sources()
+                if feature_columns:
+                    for df in market_data.values():
+                        missing = [col for col in feature_columns if col not in df.columns]
+                        for col in missing:
+                            df[col] = np.nan
+                return market_data, manifest
+
+            tickers = sorted(set(self.stocks + self.crypto))
+            if self.config.sanity_mode:
+                tickers = tickers[:3]
+
+            if not tickers:
+                raise ValueError("No tickers configured for data preparation")
+
+            market_data = self._fetch_all_symbols(tickers)
+            market_data = self._build_features(market_data)
+            manifest = self._build_manifest(market_data)
+
+            manifest.to_parquet(self._manifest_path, index=False)
+            self._persist_feature_columns(market_data)
+            self._sentinel.touch()
+
             return market_data, manifest
-
-        tickers = sorted(set(self.stocks + self.crypto))
-        if self.config.sanity_mode:
-            tickers = tickers[:3]
-
-        if not tickers:
-            raise ValueError("No tickers configured for data preparation")
-
-        market_data = self._fetch_all_symbols(tickers)
-        market_data = self._build_features(market_data)
-        manifest = self._build_manifest(market_data)
-
-        manifest.to_parquet(self._manifest_path, index=False)
-        self._persist_feature_columns(market_data)
-        self._sentinel.touch()
-
-        return market_data, manifest
+        finally:
+            self.config.use_cache = original_use_cache
 
     # ------------------------------------------------------------------
     # Fetch helpers
@@ -189,8 +201,6 @@ class FullHistoryDataManager:
 
         total_bars = 0
         market_data: Dict[str, pd.DataFrame] = {}
-        coverage_failures: List[Tuple[str, Dict[str, object]]] = []
-
         self._files_processed = 0
         self._coverage_stats = {}
 
@@ -226,7 +236,10 @@ class FullHistoryDataManager:
                         or stats["coverage_pct"] < self.config.coverage_threshold * 100
                     )
                 ):
-                    coverage_failures.append((symbol, stats))
+                    self._report_coverage_failure(symbol, stats)
+                    raise RuntimeError(
+                        "Coverage too low — check date resolution, S3 loop, Yahoo merge (no inner join)"
+                    )
 
                 pbar.update(0)
             pbar.set_description("FETCH FULL HISTORY")
@@ -235,22 +248,11 @@ class FullHistoryDataManager:
             raise RuntimeError("No market data available after fetching")
 
         self._print_coverage_summary(market_data)
+        self._persist_sources()
         print(
             f"✅ FETCH DONE — files={self._files_processed}, bars={total_bars:,}, "
             f"days={len(self._trading_days)}"
         )
-        self._persist_sources()
-
-        if coverage_failures:
-            print("\nCoverage validation failed:")
-            for symbol, stats in coverage_failures:
-                print(
-                    f"  {symbol}: {stats['coverage_pct']:.2f}% coverage, "
-                    f"unique_days={int(stats['unique_days'])}"
-                )
-            raise RuntimeError(
-                "Coverage too low — check date resolution, S3 loop, Yahoo merge (no inner join)"
-            )
 
         return market_data
 
@@ -390,11 +392,17 @@ class FullHistoryDataManager:
         frames: List[pd.DataFrame] = []
         files = 0
 
+        loaded_cache_any = False
         while True:
             cache_path = self._page_cache_path(symbol, page)
+            used_cache = False
             if self.config.use_cache and cache_path.exists():
                 df = pd.read_parquet(cache_path)
+                used_cache = True
+                loaded_cache_any = True
             else:
+                if loaded_cache_any and cursor is None and self.config.use_cache:
+                    break
                 params = {
                     "adjusted": "true",
                     "limit": min(self.config.chunk_size, 50_000),
@@ -443,6 +451,9 @@ class FullHistoryDataManager:
             files += 1
             page += 1
 
+            if used_cache:
+                continue
+
             if not cursor or self.config.sanity_mode:
                 break
 
@@ -456,8 +467,26 @@ class FullHistoryDataManager:
             return None
         if self._s3_client is not None:
             return self._s3_client
+
+        client_kwargs: Dict[str, Any] = {}
+        endpoint = os.getenv("POLYGON_S3_ENDPOINT") or os.getenv("S3_ENDPOINT")
+        access_key = os.getenv("POLYGON_S3_ACCESS_KEY") or os.getenv("AWS_ACCESS_KEY_ID")
+        secret_key = os.getenv("POLYGON_S3_SECRET_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
+        session_token = os.getenv("POLYGON_S3_SESSION_TOKEN") or os.getenv("AWS_SESSION_TOKEN")
+        region = os.getenv("POLYGON_S3_REGION") or os.getenv("AWS_REGION")
+
+        if endpoint:
+            client_kwargs["endpoint_url"] = endpoint
+        if access_key and secret_key:
+            client_kwargs["aws_access_key_id"] = access_key
+            client_kwargs["aws_secret_access_key"] = secret_key
+        if session_token:
+            client_kwargs["aws_session_token"] = session_token
+        if region:
+            client_kwargs["region_name"] = region
+
         try:  # pragma: no cover - external dependency
-            self._s3_client = boto3.client("s3")
+            self._s3_client = boto3.client("s3", **client_kwargs)
         except (BotoCoreError, NoCredentialsError, ClientError) as exc:
             print(f"⚠️  Polygon S3 client unavailable: {exc}")
             self._s3_client_failed = True
@@ -833,6 +862,13 @@ class FullHistoryDataManager:
                 f"({stats['coverage_pct']:.2f}% coverage, unique_days={int(stats['unique_days'])}, "
                 f"expected_days={int(stats['expected_days'])}) [{source}]"
             )
+
+    def _report_coverage_failure(self, symbol: str, stats: Dict[str, Any]) -> None:
+        print("\nCoverage validation failed:")
+        print(
+            f"  {symbol}: {stats['coverage_pct']:.2f}% coverage, "
+            f"unique_days={int(stats['unique_days'])}, expected_days={int(stats['expected_days'])}"
+        )
 
     def _page_cache_path(self, symbol: str, page: int) -> Path:
         directory = self._symbol_cache_dir(symbol)

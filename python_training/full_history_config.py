@@ -64,14 +64,21 @@ class FullHistoryConfig:
     def __post_init__(self) -> None:
         start_env = os.getenv("START_DATE") or os.getenv("FULL_HISTORY_START_DATE")
         end_env = os.getenv("END_DATE") or os.getenv("FULL_HISTORY_END_DATE")
+        cache_dir_env = os.getenv("CACHE_DIR") or os.getenv("FULL_HISTORY_CACHE_DIR")
+        cache_version_env = os.getenv("CACHE_VERSION") or os.getenv("FULL_HISTORY_CACHE_VERSION")
         if start_env:
             self.start = start_env
         if end_env:
             self.end = end_env
+        if cache_dir_env:
+            self.cache_dir = Path(cache_dir_env)
+        if cache_version_env:
+            self.cache_version = cache_version_env
         self.resolve_dates()
 
     def resolve_dates(self) -> None:
         """Resolve placeholders in ranges and end date."""
+        self.start = _resolve_today(self.start)
         self.end = _resolve_today(self.end)
         self.train_range = _resolve_range(self.train_range)
         self.val_range = _resolve_range(self.val_range)
