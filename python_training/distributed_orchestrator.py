@@ -59,41 +59,33 @@ class DistributedRLOrchestrator:
         print("\n🚀 PNU Training System Setup")
         print("="*70)
         
-        # Load MASSIVE S3 data instead of tiny Supabase data
-        print("📥 Loading market data from Polygon S3...")
-        self.s3_loader = S3MarketDataLoader(cache_size_gb=20.0)
+        # Use ProductionDataFetcher for real market data
+        print("📥 Fetching REAL market data (Polygon S3 + Binance + Yahoo)...")
+        from production_data_fetcher import ProductionDataFetcher
+        from datetime import datetime, timedelta
         
-        # Load a full year of data (stocks + crypto)
-        print("📊 Loading STOCKS (2023-2024)...")
-        symbol_data_stocks = self.s3_loader.load_date_range(
-            start_date="2023-01-03",
-            end_date="2024-01-31",
-            asset_type="stocks",
-            max_workers=32
+        # Get 90 days of recent data
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=90)
+        
+        fetcher = ProductionDataFetcher(
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d")
         )
         
-        print("📊 Loading CRYPTO (2023-2024)...")
-        symbol_data_crypto = self.s3_loader.load_date_range(
-            start_date="2023-01-01",
-            end_date="2024-01-31",
-            asset_type="crypto",
-            max_workers=32
-        )
+        market_data, news_data = fetcher.fetch_all()
         
-        # Combine
-        symbol_data = {**symbol_data_stocks, **symbol_data_crypto}
+        # Filter symbols with enough bars (min 1000)
+        min_bars = 1000
+        valid_symbols = [s for s, df in market_data.items() if len(df) >= min_bars]
         
-        # Get diverse symbols with enough data
-        n_total = 500
-        crypto_ratio = self.config.get('crypto_stock_ratio', 0.7)
-        n_crypto = int(n_total * crypto_ratio)
-        n_stocks = n_total - n_crypto
+        # Store data in Supabase for training
+        print(f"💾 Storing {len(valid_symbols)} symbols to Supabase...")
+        self._store_data_to_supabase(market_data, news_data, valid_symbols)
         
-        stocks = self.s3_loader.get_random_symbols(symbol_data_stocks, n_stocks, min_bars=2000)
-        crypto = self.s3_loader.get_random_symbols(symbol_data_crypto, n_crypto, min_bars=2000)
-        self.config['symbols'] = stocks + crypto
-        
-        print(f"📋 Loaded {len(self.config['symbols'])} symbols ({len(stocks)} stocks, {len(crypto)} crypto)")
+        self.config['symbols'] = valid_symbols
+        print(f"✅ Ready with {len(valid_symbols)} symbols")
+        print(f"   Data range: {start_date.date()} to {end_date.date()}")
         
         # GPU setup
         gpu_info = check_gpu_availability()
@@ -125,6 +117,39 @@ class DistributedRLOrchestrator:
             self.pbt_scheduler.initialize_population(base_hyperparams)
         
         print("✅ Setup complete\n")
+    
+    def _store_data_to_supabase(self, market_data, news_data, valid_symbols):
+        """Store fetched data to Supabase historical_bars"""
+        from supabase import create_client
+        supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+        
+        for symbol in valid_symbols:
+            df = market_data[symbol]
+            
+            # Convert to historical_bars format
+            bars = []
+            for _, row in df.iterrows():
+                bars.append({
+                    'symbol': symbol,
+                    'timestamp': row['timestamp'].isoformat(),
+                    'timeframe': '1Min',
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': int(row['volume'])
+                })
+            
+            # Batch insert (1000 at a time)
+            batch_size = 1000
+            for i in range(0, len(bars), batch_size):
+                batch = bars[i:i+batch_size]
+                try:
+                    supabase.table('historical_bars').upsert(batch).execute()
+                except Exception as e:
+                    print(f"  ⚠️ Error storing {symbol} batch {i}: {e}")
+        
+        print("✅ Data stored to Supabase")
     
     def train(self):
         """BC→PPO training pipeline"""
@@ -165,6 +190,9 @@ class DistributedRLOrchestrator:
                     config=self.config, model_class=TransformerPolicy, env_fn=make_env
                 )
                 
+                # Log metrics to Supabase
+                self._log_metrics_to_supabase(epoch + 1, metrics)
+                
                 if (epoch + 1) % 10 == 0:
                     print(f"💾 Saving checkpoint...")
                     torch.save({'epoch': epoch, 'config': self.config}, 
@@ -174,6 +202,29 @@ class DistributedRLOrchestrator:
             print("\n⚠️  Interrupted")
         finally:
             self.cleanup()
+    
+    def _log_metrics_to_supabase(self, epoch: int, metrics: dict):
+        """Log training metrics to Supabase"""
+        from supabase import create_client
+        supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+        
+        try:
+            supabase.table('training_metrics').insert({
+                'run_id': self.run_id,
+                'epoch': epoch,
+                'split': 'train',
+                'policy_loss': metrics.get('policy_loss', 0),
+                'value_loss': metrics.get('value_loss', 0),
+                'entropy': metrics.get('entropy', 0),
+                'mean_reward': metrics.get('mean_reward', 0),
+                'metadata': {
+                    'world_size': self.config['world_size'],
+                    'envs_per_gpu': self.config['envs_per_gpu'],
+                    'total_envs': self.config['world_size'] * self.config['envs_per_gpu']
+                }
+            }).execute()
+        except Exception as e:
+            print(f"⚠️ Failed to log to Supabase: {e}")
     
     def cleanup(self):
         """Cleanup"""

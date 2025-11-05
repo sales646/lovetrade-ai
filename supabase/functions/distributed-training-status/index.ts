@@ -18,119 +18,85 @@ serve(async (req) => {
   }
 
   try {
-    // Check for active distributed training runs
-    const { data: recentRuns, error: runsError } = await supabase
-      .from("training_runs")
-      .select("*")
-      .order("created_at", { ascending: false })
+    // Get latest training metrics from last 24 hours
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: metrics, error: metricsError } = await supabase
+      .from('training_metrics')
+      .select('*')
+      .gte('created_at', oneDayAgo)
+      .order('created_at', { ascending: false })
+      .limit(1000);
+
+    if (metricsError) throw metricsError;
+
+    // Get PBT populations
+    const { data: pbt, error: pbtError } = await supabase
+      .from('pbt_populations')
+      .select('*')
+      .order('created_at', { ascending: false })
       .limit(10);
 
-    if (runsError) throw runsError;
+    if (pbtError) throw pbtError;
 
-    // Find active distributed runs
-    const distributedRuns = recentRuns?.filter(run => 
-      run.status === 'running' && 
-      (run.config?.world_size > 1 || run.config?.distributed === true)
-    ) || [];
+    // Calculate aggregate stats from recent metrics
+    const recentMetrics = metrics?.slice(0, 20) || [];
+    const avgReward = recentMetrics.reduce((sum, m) => sum + (m.mean_reward || 0), 0) / (recentMetrics.length || 1);
+    const avgLoss = recentMetrics.reduce((sum, m) => sum + (m.policy_loss || 0), 0) / (recentMetrics.length || 1);
 
-    // Get GPU metrics for active runs
-    const gpuMetrics = [];
-    for (const run of distributedRuns) {
-      const { data: metrics } = await supabase
-        .from("training_metrics")
-        .select("*")
-        .eq("run_id", run.id)
-        .order("epoch", { ascending: false })
-        .limit(1);
+    // Check if training is active (metrics in last 10 minutes)
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const isActive = (metrics?.[0]?.created_at || '') > tenMinutesAgo;
 
-      if (metrics && metrics.length > 0) {
-        gpuMetrics.push({
-          run_id: run.id,
-          metrics: metrics[0]
-        });
-      }
-    }
+    // Get unique run IDs
+    const runIds = [...new Set(metrics?.map(m => m.run_id) || [])];
 
-    // Calculate stats
-    const isActive = distributedRuns.length > 0;
-    const activeCount = distributedRuns.length;
-    
-    let totalGPUs = 0;
-    let totalEnvs = 0;
-    let avgReward = 0;
-    let avgLoss = 0;
+    // System info from latest metric
+    const latestMetric = metrics?.[0];
+    const totalGPUs = latestMetric?.metadata?.world_size || 2;
+    const envsPerGPU = latestMetric?.metadata?.envs_per_gpu || 256;
+    const totalEnvs = totalGPUs * envsPerGPU;
 
-    if (distributedRuns.length > 0) {
-      totalGPUs = distributedRuns.reduce((sum, run) => 
-        sum + (run.config?.world_size || 0), 0
-      );
-      totalEnvs = distributedRuns.reduce((sum, run) => 
-        sum + (run.config?.total_envs || 0), 0
-      );
-
-      if (gpuMetrics.length > 0) {
-        avgReward = gpuMetrics.reduce((sum, m) => 
-          sum + (m.metrics.mean_reward || 0), 0
-        ) / gpuMetrics.length;
-        avgLoss = gpuMetrics.reduce((sum, m) => 
-          sum + (m.metrics.loss || 0), 0
-        ) / gpuMetrics.length;
-      }
-    }
-
-    // Get PBT status
-    const pbtEnabled = distributedRuns.some(run => run.config?.pbt_enabled === true);
-    let pbtStats = null;
-
-    if (pbtEnabled) {
-      // Get PBT population performance
-      const { data: pbtData } = await supabase
-        .from("pbt_populations")
-        .select("*")
-        .order("generation", { ascending: false })
-        .limit(10);
-
-      if (pbtData && pbtData.length > 0) {
-        const latest = pbtData[0];
-        pbtStats = {
-          generation: latest.generation,
-          best_performance: latest.best_performance,
-          mean_performance: latest.mean_performance,
-          population_size: latest.population_size
-        };
-      }
-    }
-
-    return new Response(
-      JSON.stringify({
-        is_active: isActive,
-        active_count: activeCount,
-        total_gpus: totalGPUs,
-        total_environments: totalEnvs,
-        performance: {
-          avg_reward: avgReward,
-          avg_loss: avgLoss
-        },
-        pbt: pbtEnabled ? pbtStats : null,
-        recent_runs: distributedRuns.map(run => ({
-          id: run.id,
-          status: run.status,
-          started_at: run.created_at,
+    const status = {
+      is_active: isActive,
+      total_gpus: totalGPUs,
+      total_environments: totalEnvs,
+      performance: {
+        avg_reward: avgReward,
+        avg_loss: avgLoss,
+      },
+      pbt: pbt && pbt.length > 0 ? {
+        generation: pbt[0].generation,
+        population_size: pbt[0].population_size,
+        best_performance: pbt[0].best_performance,
+        mean_performance: pbt[0].mean_performance,
+      } : null,
+      recent_runs: runIds.slice(0, 5).map(id => {
+        const runMetrics = metrics?.filter(m => m.run_id === id) || [];
+        const firstMetric = runMetrics[runMetrics.length - 1];
+        const lastMetric = runMetrics[0];
+        
+        return {
+          id,
+          status: lastMetric?.created_at > tenMinutesAgo ? 'running' : 'completed',
+          started_at: firstMetric?.created_at,
           config: {
-            world_size: run.config?.world_size || 1,
-            envs_per_gpu: run.config?.envs_per_gpu || 0,
-            model_type: run.config?.model_type || 'unknown',
-            pbt_enabled: run.config?.pbt_enabled || false
+            world_size: firstMetric?.metadata?.world_size || 2,
+            envs_per_gpu: firstMetric?.metadata?.envs_per_gpu || 256,
+            model_type: 'transformer',
+            pbt_enabled: pbt && pbt.length > 0,
           }
-        })),
-        system_info: {
-          distributed_available: true,
-          max_gpus: 8,
-          bf16_supported: true
         }
       }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+      system_info: {
+        distributed_available: true,
+        max_gpus: totalGPUs,
+        bf16_supported: true,
+      }
+    };
+
+    return new Response(JSON.stringify(status), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
   } catch (error) {
     console.error("Distributed training status error:", error);
     return new Response(
