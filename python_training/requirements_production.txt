@@ -1,0 +1,26 @@
+# Production Training Requirements - Real Data Only
+
+# Core ML
+torch>=2.0.0
+numpy>=1.24.0
+pandas>=2.0.0
+gymnasium>=0.29.0
+
+# Data Sources
+boto3>=1.34.0          # Polygon S3 via Massive
+requests>=2.31.0       # Binance API
+yfinance>=0.2.40       # Yahoo Finance
+python-dotenv>=1.0.0
+
+# Database
+supabase>=2.0.0
+psycopg2-binary>=2.9.0
+
+# Utilities
+tqdm>=4.66.0
+python-dateutil>=2.8.0
+pytz>=2024.1
+
+# Optional but recommended
+# scipy>=1.11.0        # For advanced indicators
+# ta-lib               # Technical analysis (requires system install)
