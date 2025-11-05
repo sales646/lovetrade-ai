@@ -20,10 +20,12 @@ from torch.nn.utils import clip_grad_norm_
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
-from tqdm import tqdm
 
 from full_history_config import FullHistoryConfig
 from full_history_data import FullHistoryDataManager
+from offline_dataset import BehaviorCloningTrainer, ExpertDatasetBuilder
+from progress import PhaseProgress
+from supabase_logger import SupabaseLogger
 from trading_environment import create_trading_env
 from transformer_policy import TransformerPolicy
 
@@ -56,6 +58,8 @@ class ProductionTrainer:
         self.rank, self.world_size = self._setup_distributed()
         self.device = self._resolve_device()
         self.training_dir = self._resolve_training_dir()
+        self.progress = PhaseProgress()
+        self.supabase = SupabaseLogger()
 
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -70,6 +74,11 @@ class ProductionTrainer:
         self.discount_gamma: float = self.config.get("gamma", 0.99)
         self.eval_windows: int = self.config.get("eval_windows", 64)
         self.patience: int = self.config.get("patience", 12)
+        ppo_cfg = self.config.get("ppo", {})
+        self.clip_range: float = ppo_cfg.get("clip_range", 0.2)
+        self.kl_coef: float = ppo_cfg.get("kl_coef", 1.0)
+        self.kl_target: Optional[float] = ppo_cfg.get("kl_target", 0.01)
+        self.kl_adapt_rate: float = ppo_cfg.get("kl_adapt_rate", 1.5)
 
         self.market_data: Dict[str, pd.DataFrame] = {}
         self.env_manifest = pd.DataFrame()
@@ -77,6 +86,11 @@ class ProductionTrainer:
         self.policy: Optional[TransformerPolicy] = None
         self.optimizer: Optional[torch.optim.Optimizer] = None
         self.scheduler: Optional[LambdaLR] = None
+        self.bc_metrics: Dict[str, float] = {}
+        self.bc_checkpoint: Optional[Path] = None
+        self.bc_dataset = None
+        self.bc_reference: Optional[TransformerPolicy] = None
+        self.bc_state_dict: Optional[Dict[str, torch.Tensor]] = None
 
         if self.rank == 0:
             print(f"🖥️  Device: {self.device}")
@@ -140,7 +154,8 @@ class ProductionTrainer:
     # ------------------------------------------------------------------
     def prepare_data(self) -> None:
         market_data, manifest = self.data_manager.prepare(
-            force_full_prep=self.config.get("force_full_prep")
+            force_full_prep=self.config.get("force_full_prep"),
+            progress=self.progress,
         )
         self.market_data = market_data
         self.env_manifest = manifest
@@ -151,6 +166,8 @@ class ProductionTrainer:
         self.train_specs = self.env_specs.get("TRAIN", [])
         self.val_specs = self.env_specs.get("VAL", [])
         self.test_specs = self.env_specs.get("TEST", [])
+
+        self.bc_dataset = self._build_offline_dataset()
 
         if not self.train_specs:
             raise RuntimeError("No training window specs available")
@@ -163,6 +180,93 @@ class ProductionTrainer:
                 f"val={split_counts.get('VAL', 0)}, test={split_counts.get('TEST', 0)}"
             )
             print("✅ PREP DONE — starting training now")
+
+    def _build_offline_dataset(self):
+        train_range = self.settings.resolved_range(self.settings.train_range)
+        val_range = self.settings.resolved_range(self.settings.val_range)
+        test_range = self.settings.resolved_range(self.settings.test_range)
+        builder = ExpertDatasetBuilder(train_range, val_range, test_range)
+        return builder.build(self.market_data)
+
+    def _policy_kwargs(self) -> Dict[str, int]:
+        policy_cfg = self.config.get("policy", {})
+        feature_dim = int(self.bc_dataset.train.features.shape[1])
+        return {
+            "state_dim": feature_dim,
+            "action_dim": policy_cfg.get("action_dim", 3),
+            "size_dim": policy_cfg.get("size_dim", 5),
+            "d_model": policy_cfg.get("d_model", 256),
+            "nhead": policy_cfg.get("num_heads", 8),
+            "num_layers": policy_cfg.get("num_layers", 4),
+            "dim_feedforward": policy_cfg.get("dim_feedforward", 1024),
+            "dropout": policy_cfg.get("dropout", 0.1),
+        }
+
+    def _create_policy(self) -> TransformerPolicy:
+        kwargs = self._policy_kwargs()
+        policy = TransformerPolicy(config=kwargs)
+        return policy.to(self.device)
+
+    def _run_behavioral_cloning(self) -> None:
+        if self.bc_dataset is None:
+            raise RuntimeError("BC dataset not prepared")
+
+        self.policy = self._create_policy()
+
+        if self.rank == 0:
+            print("🚀 TRAINING START (BC)")
+
+        bc_cfg = self.config.get("bc", {})
+        epochs = bc_cfg.get("epochs", 20)
+        batch_size = bc_cfg.get("batch_size", 256)
+        patience = bc_cfg.get("patience", 6)
+
+        trainer = BehaviorCloningTrainer(
+            policy=self.policy,
+            feature_dim=self.bc_dataset.train.features.shape[1],
+            action_classes=bc_cfg.get("action_dim", 3),
+            size_classes=bc_cfg.get("size_dim", 5),
+            lr=bc_cfg.get("lr", 3e-4),
+            weight_decay=bc_cfg.get("weight_decay", 0.01),
+            dropout=bc_cfg.get("dropout", 0.15),
+            label_smoothing=bc_cfg.get("label_smoothing", 0.05),
+            device=self.device,
+        )
+
+        self.progress.start("BC TRAIN", total=epochs, unit="epoch")
+
+        def callback(epoch: int, metrics: Dict[str, float]) -> None:
+            if self.rank == 0:
+                self.progress.update("BC TRAIN")
+                payload = {
+                    "bc_loss": metrics.get("loss", 0.0),
+                    "bc_acc": metrics.get("accuracy", 0.0),
+                    "bc_f1": metrics.get("macro_f1", 0.0),
+                    "bc_ece": metrics.get("ece", 0.0),
+                }
+                self.supabase.log_metrics("val", epoch, payload)
+
+        final_metrics = trainer.fit(
+            self.bc_dataset,
+            batch_size=batch_size,
+            epochs=epochs,
+            patience=patience,
+            progress_callback=callback,
+        )
+        self.progress.close("BC TRAIN")
+        self.bc_metrics = final_metrics
+
+        if self.rank == 0:
+            self.bc_checkpoint = self.training_dir / "behavioral_cloning.pt"
+            torch.save(self.policy.state_dict(), self.bc_checkpoint)
+
+        reference = self._create_policy()
+        reference.load_state_dict(self.policy.state_dict())
+        reference.eval()
+        for param in reference.parameters():
+            param.requires_grad_(False)
+        self.bc_reference = reference
+        self.bc_state_dict = {k: v.detach().cpu() for k, v in self.policy.state_dict().items()}
 
     # ------------------------------------------------------------------
     # Environment helpers
@@ -197,20 +301,9 @@ class ProductionTrainer:
     # Policy setup
     # ------------------------------------------------------------------
     def initialize_policy(self, seed: int) -> None:
-        sample_env = self._create_env_from_spec(self.train_specs[0])
-        sample_obs, _ = self._reset_env(sample_env, phase="train")
-        obs_dim = int(np.prod(sample_obs.shape))
-        act_dim = 3
-
-        policy_kwargs = self.config.get("policy", {})
-        self.policy = TransformerPolicy(
-            state_dim=obs_dim,
-            action_dim=act_dim,
-            d_model=policy_kwargs.get("d_model", 256),
-            nhead=policy_kwargs.get("num_heads", 8),
-            num_layers=policy_kwargs.get("num_layers", 4),
-            dropout=policy_kwargs.get("dropout", 0.1),
-        ).to(self.device)
+        self.policy = self._create_policy()
+        if self.bc_state_dict:
+            self.policy.load_state_dict(self.bc_state_dict)
 
         if self.world_size > 1:
             self.policy = DDP(self.policy, device_ids=[self.device.index], find_unused_parameters=False)
@@ -239,15 +332,32 @@ class ProductionTrainer:
     # Training
     # ------------------------------------------------------------------
     def train(self) -> None:
+        run_config = {
+            "start": self.settings.start,
+            "end": self.settings.end,
+            "seeds": list(self.training_seeds),
+            "max_stocks": self.config.get("MAX_STOCKS"),
+            "max_crypto": self.config.get("MAX_CRYPTO"),
+        }
+        if self.rank == 0:
+            self.supabase.start_run(run_config)
+
         self.prepare_data()
+        self._run_behavioral_cloning()
+
         metrics: List[TrainingMetrics] = []
+        total_epochs = self.epochs * max(1, len(self.training_seeds))
+        self.progress.start("PPO TRAIN", total=total_epochs, unit="epoch")
+
         for idx, seed in enumerate(self.training_seeds):
             if self.rank == 0:
-                print(f"\n===== Training seed {seed} ({idx + 1}/{len(self.training_seeds)}) =====")
+                print(f"\n===== PPO seed {seed} ({idx + 1}/{len(self.training_seeds)}) =====")
             self._set_seed(seed)
             self.initialize_policy(seed)
             seed_metrics = self._train_single_seed(seed)
             metrics.append(seed_metrics)
+
+        self.progress.close("PPO TRAIN")
 
         if self.rank == 0:
             aggregated = self._aggregate_metrics(metrics)
@@ -256,6 +366,9 @@ class ProductionTrainer:
                 f"@ epoch {aggregated['best_epoch']} — checkpoint: {aggregated['checkpoint']}"
             )
             self._print_summary_table(aggregated)
+            self.supabase.finalize_run("completed")
+
+        self.supabase.close()
 
     def _train_single_seed(self, seed: int) -> TrainingMetrics:
         assert self.policy is not None
@@ -269,12 +382,7 @@ class ProductionTrainer:
         steps_per_epoch = min(self.train_steps_per_epoch, len(self.train_specs))
         total_steps = max(1, steps_per_epoch * self.epochs)
 
-        if self.rank == 0:
-            train_bar = tqdm(range(self.epochs), desc="TRAIN", unit="epoch")
-        else:
-            train_bar = range(self.epochs)
-
-        for epoch in train_bar:
+        for epoch in range(self.epochs):
             epoch_returns: List[float] = []
             epoch_losses: List[float] = []
             self.optimizer.zero_grad(set_to_none=True)
@@ -297,7 +405,7 @@ class ProductionTrainer:
                     if not first_step_reported and self.rank == 0:
                         train_metrics = self._compute_metrics_from_returns(epoch_returns)
                         print(
-                            "🚀 TRAINING START | "
+                            "🚀 TRAINING START (PPO) | "
                             f"loss={np.mean(epoch_losses):.4f} "
                             f"sharpe={train_metrics['sharpe']:.3f} "
                             f"sortino={train_metrics['sortino']:.3f} "
@@ -318,13 +426,19 @@ class ProductionTrainer:
             val_metrics = self._evaluate_split(self.val_specs, deterministic=True)
             test_metrics = self._evaluate_split(self.test_specs, deterministic=True)
 
-            if self.rank == 0 and isinstance(train_bar, tqdm):
-                train_bar.set_postfix(
-                    loss=np.mean(epoch_losses),
-                    sharpe=train_metrics["sharpe"],
-                    sortino=train_metrics["sortino"],
-                    val_sortino=val_metrics["sortino"],
+            if self.rank == 0:
+                self.supabase.log_metrics(
+                    "train",
+                    epoch,
+                    {
+                        "loss": float(np.mean(epoch_losses)),
+                        **train_metrics,
+                    },
                 )
+                self.supabase.log_metrics("val", epoch, val_metrics)
+                self.supabase.log_metrics("test", epoch, test_metrics)
+
+            self.progress.update("PPO TRAIN")
 
             if val_metrics["sortino"] > best_sortino:
                 best_sortino = val_metrics["sortino"]
@@ -337,6 +451,9 @@ class ProductionTrainer:
             if patience_counter >= self.patience:
                 if self.rank == 0:
                     print(f"Early stopping triggered at epoch {epoch}")
+                remaining_epochs = self.epochs - epoch - 1
+                if remaining_epochs > 0:
+                    self.progress.update("PPO TRAIN", remaining_epochs)
                 break
 
         if best_path is None:
@@ -360,24 +477,14 @@ class ProductionTrainer:
     # ------------------------------------------------------------------
     # Episodes and losses
     # ------------------------------------------------------------------
-    def _policy_forward(self, obs_tensor: torch.Tensor) -> Dict[str, torch.Tensor]:
-        module = self.policy.module if isinstance(self.policy, DDP) else self.policy
-        if obs_tensor.dim() == 1:
-            obs_tensor = obs_tensor.unsqueeze(0)
-        obs_tensor = obs_tensor.unsqueeze(1)
-        x = module.input_embedding(obs_tensor)
-        x = module.pos_encoder(x)
-        x = module.transformer_encoder(x)
-        x = x[:, -1, :]
-        logits = module.actor(x)
-        value = module.critic(x).squeeze(-1)
-        return {"logits": logits, "value": value}
-
     def _collect_episode(self, spec: Dict, train: bool) -> Dict:
         env = self._create_env_from_spec(spec)
         obs, _ = self._reset_env(env, phase=spec["split"])
         done = False
 
+        states: List[torch.Tensor] = []
+        actions: List[torch.Tensor] = []
+        sizes: List[torch.Tensor] = []
         log_probs: List[torch.Tensor] = []
         values: List[torch.Tensor] = []
         rewards: List[float] = []
@@ -385,21 +492,27 @@ class ProductionTrainer:
 
         autocast_enabled = self.device.type == "cuda"
         grad_context = nullcontext() if train else torch.no_grad()
+        module = self.policy.module if isinstance(self.policy, DDP) else self.policy
 
         while not done:
-            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
+            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             with grad_context:
                 with torch.cuda.amp.autocast(enabled=autocast_enabled):
-                    outputs = self._policy_forward(obs_tensor)
-            dist = torch.distributions.Categorical(logits=outputs["logits"])
-            action = dist.sample() if train else torch.argmax(outputs["logits"], dim=-1)
-            log_prob = dist.log_prob(action)
-            entropy = dist.entropy()
+                    action_tensor, size_tensor, value, log_prob, entropy, _ = module(obs_tensor)
+
+            action = action_tensor.squeeze(0)
+            size = size_tensor.squeeze(0)
+            log_prob = log_prob.squeeze(0)
+            entropy = entropy.squeeze(0)
+            value = value.squeeze(0)
 
             next_obs, reward, terminated, truncated, _ = self._step_env(env, int(action.item()))
 
+            states.append(obs_tensor.squeeze(0))
+            actions.append(action)
+            sizes.append(size)
             log_probs.append(log_prob)
-            values.append(outputs["value"])  # already 1D tensor
+            values.append(value)
             rewards.append(float(reward))
             entropies.append(entropy)
 
@@ -407,6 +520,9 @@ class ProductionTrainer:
             done = bool(terminated or truncated)
 
         return {
+            "states": states,
+            "actions": actions,
+            "sizes": sizes,
             "log_probs": log_probs,
             "values": values,
             "rewards": rewards,
@@ -417,19 +533,52 @@ class ProductionTrainer:
         rewards = episode["rewards"]
         returns = self._discount_rewards(rewards)
         returns_tensor = torch.tensor(returns, dtype=torch.float32, device=self.device)
-        values = torch.stack(episode["values"])
-        log_probs = torch.stack(episode["log_probs"])
-        entropies = torch.stack(episode["entropies"])
+        states = torch.stack(episode["states"])
+        actions = torch.stack(episode["actions"]).long()
+        sizes = torch.stack(episode["sizes"]).long()
+        old_log_probs = torch.stack(episode["log_probs"]).detach()
+        old_values = torch.stack(episode["values"])
 
-        advantages = returns_tensor - values.detach()
-        policy_loss = -(log_probs * advantages).mean()
+        advantages = returns_tensor - old_values.detach()
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        module = self.policy.module if isinstance(self.policy, DDP) else self.policy
+        new_log_probs, entropies, values, _ = module.evaluate_actions(states, actions, sizes)
+
+        ratio = torch.exp(new_log_probs - old_log_probs)
+        clipped_ratio = torch.clamp(ratio, 1.0 - self.clip_range, 1.0 + self.clip_range)
+        surrogate1 = ratio * advantages
+        surrogate2 = clipped_ratio * advantages
+        policy_loss = -torch.min(surrogate1, surrogate2).mean()
+
         value_loss = 0.5 * (returns_tensor - values).pow(2).mean()
         entropy_loss = -entropies.mean()
 
-        loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
+        if self.bc_reference is not None:
+            with torch.no_grad():
+                bc_log_probs, _, _, _ = self.bc_reference.evaluate_actions(states, actions, sizes)
+            kl = (new_log_probs - bc_log_probs).mean()
+        else:
+            kl = torch.tensor(0.0, device=self.device)
+
+        loss = (
+            policy_loss
+            + self.value_coef * value_loss
+            + self.entropy_coef * entropy_loss
+            + self.kl_coef * kl
+        )
+
         scaled_loss = loss / self.grad_accum_steps
         scaler.scale(scaled_loss).backward()
         episode_return = sum(rewards)
+
+        if self.rank == 0 and self.kl_target is not None:
+            kl_value = float(abs(kl.detach()))
+            if kl_value > self.kl_target * 1.5:
+                self.kl_coef *= self.kl_adapt_rate
+            elif kl_value < self.kl_target / 1.5:
+                self.kl_coef /= self.kl_adapt_rate
+
         return loss.detach(), episode_return
 
     def _discount_rewards(self, rewards: List[float]) -> List[float]:

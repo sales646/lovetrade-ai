@@ -6,10 +6,11 @@ import os
 import random
 import shutil
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,7 @@ import requests
 from tqdm import tqdm
 
 from .full_history_config import FullHistoryConfig
+from .progress import PhaseProgress
 
 try:  # Optional dependency for NYSE calendar
     import pandas_market_calendars as mcal
@@ -84,14 +86,42 @@ class FullHistoryDataManager:
         self._coverage_stats: Dict[str, Dict[str, object]] = {}
         self._s3_client = None
         self._s3_client_failed = False
+        self._progress: Optional[PhaseProgress] = None
+        self._news_cache: Dict[str, pd.DataFrame] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def prepare(self, force_full_prep: Optional[bool] = None) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
+    def _start_phase(self, name: str, total: Optional[int] = None, unit: Optional[str] = None) -> None:
+        if self._progress:
+            self._progress.start(name, total=total, unit=unit)
+
+    def _advance_phase(self, name: str, increment: int = 1) -> None:
+        if self._progress:
+            self._progress.update(name, increment)
+
+    def _close_phase(self, name: str) -> None:
+        if self._progress:
+            self._progress.close(name)
+
+    def _phase_hook(self, name: str) -> Callable[[float], None]:
+        def hook(increment: float) -> None:
+            if increment <= 0:
+                return
+            self._advance_phase(name, int(increment))
+
+        return hook
+
+    def prepare(
+        self,
+        force_full_prep: Optional[bool] = None,
+        progress: Optional[PhaseProgress] = None,
+    ) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
         """Prepare full-history data and return market data and manifest."""
 
         force = force_full_prep if force_full_prep is not None else self.config.force_full_prep
+        if progress is not None:
+            self._progress = progress
         if force:
             for path in [self._sentinel, self._manifest_path, self._feature_path, self._source_path]:
                 if path.exists():
@@ -153,6 +183,8 @@ class FullHistoryDataManager:
             return market_data, manifest
         finally:
             self.config.use_cache = original_use_cache
+            if progress is not None:
+                self._progress = None
 
     # ------------------------------------------------------------------
     # Fetch helpers
@@ -197,52 +229,45 @@ class FullHistoryDataManager:
         print(f"Last 5: {last_days}")
 
     def _fetch_all_symbols(self, tickers: Sequence[str]) -> Dict[str, pd.DataFrame]:
-        """Fetch full history for every ticker with a progress bar."""
+        """Fetch full history for every ticker with a single phase progress bar."""
 
         total_bars = 0
         market_data: Dict[str, pd.DataFrame] = {}
         self._files_processed = 0
         self._coverage_stats = {}
 
-        print()
-        trading_day_total = max(1, len(self._trading_days))
+        total_days = max(1, len(self._trading_days)) * max(1, len(tickers))
+        self._start_phase("FETCH FULL HISTORY", total=total_days, unit="day")
+        progress_hook = self._phase_hook("FETCH FULL HISTORY")
 
-        with tqdm(total=trading_day_total, desc="FETCH FULL HISTORY", unit="day") as pbar:
-            for symbol in tickers:
-                pbar.reset(total=trading_day_total)
-                pbar.set_description(f"FETCH {symbol}")
+        for symbol in tickers:
+            df, source, files_used = self._fetch_symbol(symbol, progress_hook=progress_hook)
 
-                progress_hook = self._progress_hook_for_bar(pbar)
-                df, source, files_used = self._fetch_symbol(symbol, progress_hook=progress_hook)
+            if df is None or df.empty:
+                continue
 
-                if pbar.n < pbar.total:
-                    pbar.update(pbar.total - pbar.n)
+            self._files_processed += files_used
+            total_bars += len(df)
+            market_data[symbol] = df
+            self._persist_full_symbol(symbol, df)
+            self._symbol_sources[symbol] = source or "unknown"
 
-                if df is None or df.empty:
-                    continue
+            stats = self._compute_coverage_stats(symbol, df)
+            self._coverage_stats[symbol] = stats
+            if (
+                not self.config.sanity_mode
+                and (
+                    stats["unique_days"] < 1000
+                    or stats["coverage_pct"] < self.config.coverage_threshold * 100
+                )
+            ):
+                self._report_coverage_failure(symbol, stats)
+                self._close_phase("FETCH FULL HISTORY")
+                raise RuntimeError(
+                    "Coverage too low — check date resolution, S3 loop, Yahoo merge (no inner join)"
+                )
 
-                self._files_processed += files_used
-                total_bars += len(df)
-                market_data[symbol] = df
-                self._persist_full_symbol(symbol, df)
-                self._symbol_sources[symbol] = source or "unknown"
-
-                stats = self._compute_coverage_stats(symbol, df)
-                self._coverage_stats[symbol] = stats
-                if (
-                    not self.config.sanity_mode
-                    and (
-                        stats["unique_days"] < 1000
-                        or stats["coverage_pct"] < self.config.coverage_threshold * 100
-                    )
-                ):
-                    self._report_coverage_failure(symbol, stats)
-                    raise RuntimeError(
-                        "Coverage too low — check date resolution, S3 loop, Yahoo merge (no inner join)"
-                    )
-
-                pbar.update(0)
-            pbar.set_description("FETCH FULL HISTORY")
+        self._close_phase("FETCH FULL HISTORY")
 
         if not market_data:
             raise RuntimeError("No market data available after fetching")
@@ -255,15 +280,6 @@ class FullHistoryDataManager:
         )
 
         return market_data
-
-    def _progress_hook_for_bar(self, bar: tqdm) -> Callable[[float], None]:
-        def hook(increment: float) -> None:
-            if increment <= 0:
-                return
-            remaining = max(bar.total - bar.n, 0)
-            bar.update(min(increment, remaining))
-
-        return hook
 
     def _fetch_symbol(
         self,
@@ -677,37 +693,43 @@ class FullHistoryDataManager:
         feature_columns_set: Set[str] = set()
         enriched: Dict[str, pd.DataFrame] = {}
 
-        with tqdm(total=len(market_data), desc="FEATURE BUILD", unit="symbol") as pbar:
-            for symbol, df in market_data.items():
-                bars = df.copy()
-                bars = bars.sort_values("timestamp").reset_index(drop=True)
+        self._start_phase("FEATURE BUILD", total=len(market_data), unit="symbol")
+        for symbol, df in market_data.items():
+            bars = df.copy()
+            bars = bars.sort_values("timestamp").reset_index(drop=True)
 
-                bars["log_return"] = np.log(bars["close"]).diff().fillna(0.0)
-                bars["pct_change"] = bars["close"].pct_change().fillna(0.0)
-                bars["rolling_vol_64"] = bars["log_return"].rolling(64, min_periods=8).std().fillna(method="bfill").fillna(0.0)
-                bars["rolling_vol_256"] = bars["log_return"].rolling(256, min_periods=32).std().fillna(method="bfill").fillna(0.0)
-                bars["rolling_mean_32"] = (
-                    bars["close"].rolling(32, min_periods=8).mean().fillna(method="bfill").fillna(method="ffill")
-                )
-                bars["rolling_mean_128"] = (
-                    bars["close"].rolling(128, min_periods=32).mean().fillna(method="bfill").fillna(method="ffill")
-                )
-                rolling_vol = bars["volume"].rolling(128, min_periods=32)
-                bars["volume_zscore"] = (bars["volume"] - rolling_vol.mean()) / rolling_vol.std().replace(0, np.nan)
-                bars["volume_zscore"] = bars["volume_zscore"].fillna(0.0)
-                bars["high_low_range"] = (bars["high"] - bars["low"]) / bars["close"].replace(0, np.nan)
-                bars["high_low_range"] = bars["high_low_range"].fillna(0.0)
+            bars["log_return"] = np.log(bars["close"]).diff().fillna(0.0)
+            bars["pct_change"] = bars["close"].pct_change().fillna(0.0)
+            bars["rolling_vol_64"] = (
+                bars["log_return"].rolling(64, min_periods=8).std().fillna(method="bfill").fillna(0.0)
+            )
+            bars["rolling_vol_256"] = (
+                bars["log_return"].rolling(256, min_periods=32).std().fillna(method="bfill").fillna(0.0)
+            )
+            bars["rolling_mean_32"] = (
+                bars["close"].rolling(32, min_periods=8).mean().fillna(method="bfill").fillna(method="ffill")
+            )
+            bars["rolling_mean_128"] = (
+                bars["close"].rolling(128, min_periods=32).mean().fillna(method="bfill").fillna(method="ffill")
+            )
+            rolling_vol = bars["volume"].rolling(128, min_periods=32)
+            bars["volume_zscore"] = (bars["volume"] - rolling_vol.mean()) / rolling_vol.std().replace(0, np.nan)
+            bars["volume_zscore"] = bars["volume_zscore"].fillna(0.0)
+            bars["high_low_range"] = (bars["high"] - bars["low"]) / bars["close"].replace(0, np.nan)
+            bars["high_low_range"] = bars["high_low_range"].fillna(0.0)
 
-                # Clip extreme outliers to reduce noise
-                bars = self._clip_outliers(bars)
+            bars = self._attach_news_features(symbol, bars)
+            bars = self._clip_outliers(bars)
 
-                feature_columns = [
-                    col for col in bars.columns if col not in {"timestamp", "open", "high", "low", "close", "volume"}
-                ]
-                feature_columns_set.update(feature_columns)
-                enriched[symbol] = bars
-                self._persist_full_symbol(symbol, bars)
-                pbar.update(1)
+            feature_columns = [
+                col for col in bars.columns if col not in {"timestamp", "open", "high", "low", "close", "volume"}
+            ]
+            feature_columns_set.update(feature_columns)
+            enriched[symbol] = bars
+            self._persist_full_symbol(symbol, bars)
+            self._advance_phase("FEATURE BUILD")
+
+        self._close_phase("FEATURE BUILD")
 
         feature_count = len(feature_columns_set)
         print(f"✅ FEATURES DONE — {feature_count} features")
@@ -723,54 +745,56 @@ class FullHistoryDataManager:
         val_start, val_end = self.config.resolved_range(self.config.val_range)
         test_start, test_end = self.config.resolved_range(self.config.test_range)
 
-        with tqdm(total=len(market_data), desc="WINDOWING", unit="symbol") as pbar:
-            for symbol, df in market_data.items():
-                if len(df) < self.config.min_bars_for_windowing:
-                    pbar.update(1)
+        self._start_phase("WINDOWING", total=len(market_data), unit="symbol")
+        for symbol, df in market_data.items():
+            if len(df) < self.config.min_bars_for_windowing:
+                self._advance_phase("WINDOWING")
+                continue
+
+            timestamps = df["timestamp"].tolist()
+            total = len(df)
+            data_path = self._relative_data_path(symbol)
+
+            for start_idx in range(0, total - self.config.window_size + 1, self.config.window_stride):
+                end_idx = start_idx + self.config.window_size
+                window_start = timestamps[start_idx]
+                window_end = timestamps[end_idx - 1]
+
+                split = self._determine_split(
+                    window_start,
+                    window_end,
+                    train_range=(train_start, train_end),
+                    val_range=(val_start, val_end),
+                    test_range=(test_start, test_end),
+                )
+                if not split:
                     continue
 
-                timestamps = df["timestamp"].tolist()
-                total = len(df)
-                data_path = self._relative_data_path(symbol)
+                window_df = df.iloc[start_idx:end_idx]
+                window_return = window_df["close"].iloc[-1] / window_df["close"].iloc[0] - 1
+                if window_return > 0.02:
+                    regime = "bull"
+                elif window_return < -0.02:
+                    regime = "bear"
+                else:
+                    regime = "sideways"
 
-                for start_idx in range(0, total - self.config.window_size + 1, self.config.window_stride):
-                    end_idx = start_idx + self.config.window_size
-                    window_start = timestamps[start_idx]
-                    window_end = timestamps[end_idx - 1]
-
-                    split = self._determine_split(
-                        window_start,
-                        window_end,
-                        train_range=(train_start, train_end),
-                        val_range=(val_start, val_end),
-                        test_range=(test_start, test_end),
+                specs.append(
+                    WindowSpec(
+                        symbol=symbol,
+                        split=split,
+                        start_idx=start_idx,
+                        end_idx=end_idx,
+                        start_ts=window_start,
+                        end_ts=window_end,
+                        regime=regime,
+                        data_path=data_path,
                     )
-                    if not split:
-                        continue
+                )
 
-                    window_df = df.iloc[start_idx:end_idx]
-                    window_return = window_df["close"].iloc[-1] / window_df["close"].iloc[0] - 1
-                    if window_return > 0.02:
-                        regime = "bull"
-                    elif window_return < -0.02:
-                        regime = "bear"
-                    else:
-                        regime = "sideways"
+            self._advance_phase("WINDOWING")
 
-                    specs.append(
-                        WindowSpec(
-                            symbol=symbol,
-                            split=split,
-                            start_idx=start_idx,
-                            end_idx=end_idx,
-                            start_ts=window_start,
-                            end_ts=window_end,
-                            regime=regime,
-                            data_path=data_path,
-                        )
-                    )
-
-                pbar.update(1)
+        self._close_phase("WINDOWING")
 
         if not specs:
             raise RuntimeError("No window specs generated - check data availability")
@@ -851,6 +875,137 @@ class FullHistoryDataManager:
             q_high = series.quantile(0.999)
             df[col] = series.clip(lower=q_low, upper=q_high)
         return df
+
+    def _attach_news_features(self, symbol: str, bars: pd.DataFrame) -> pd.DataFrame:
+        news_df = self._load_news(symbol)
+        if news_df.empty:
+            for col in [
+                "news_count",
+                "news_sent_mean",
+                "news_sent_max",
+                "news_sent_min",
+                "news_headline_len_mean",
+            ]:
+                bars[col] = 0.0
+            return bars
+
+        window = pd.Timedelta(minutes=60)
+        articles = deque()
+        timestamps = news_df["timestamp"].tolist()
+        sentiments_raw = news_df["sentiment"].tolist()
+        lengths = news_df["headline_len"].tolist()
+
+        idx = 0
+        count_feature = []
+        mean_feature = []
+        max_feature = []
+        min_feature = []
+        len_feature = []
+
+        for ts in bars["timestamp"]:
+            while idx < len(timestamps) and timestamps[idx] <= ts:
+                articles.append((timestamps[idx], sentiments_raw[idx], lengths[idx]))
+                idx += 1
+            while articles and articles[0][0] < ts - window:
+                articles.popleft()
+
+            if articles:
+                values = [item[1] for item in articles]
+                lengths_window = [item[2] for item in articles]
+                count_feature.append(float(len(values)))
+                mean_feature.append(float(np.mean(values)))
+                max_feature.append(float(np.max(values)))
+                min_feature.append(float(np.min(values)))
+                len_feature.append(float(np.mean(lengths_window)))
+            else:
+                count_feature.append(0.0)
+                mean_feature.append(0.0)
+                max_feature.append(0.0)
+                min_feature.append(0.0)
+                len_feature.append(0.0)
+
+        bars["news_count"] = count_feature
+        bars["news_sent_mean"] = mean_feature
+        bars["news_sent_max"] = max_feature
+        bars["news_sent_min"] = min_feature
+        bars["news_headline_len_mean"] = len_feature
+        return bars
+
+    def _load_news(self, symbol: str) -> pd.DataFrame:
+        if symbol in self._news_cache:
+            return self._news_cache[symbol]
+        if yf is None:
+            df = pd.DataFrame(columns=["timestamp", "sentiment", "headline_len"])
+            self._news_cache[symbol] = df
+            return df
+        try:
+            ticker = yf.Ticker(symbol)
+            news_items = ticker.news or []
+        except Exception:
+            news_items = []
+
+        rows = []
+        for item in news_items:
+            ts = item.get("providerPublishTime") or item.get("published")
+            if ts is None:
+                continue
+            if isinstance(ts, (int, float)):
+                timestamp = datetime.utcfromtimestamp(ts)
+            else:
+                timestamp = pd.to_datetime(ts, utc=True).to_pydatetime()
+            timestamp = timestamp.replace(tzinfo=None)
+            if timestamp < self._start_dt or timestamp > self._end_dt:
+                continue
+            headline = item.get("title") or ""
+            sentiment = self._headline_sentiment(headline)
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "sentiment": sentiment,
+                    "headline_len": float(len(headline)),
+                }
+            )
+
+        if rows:
+            df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+        else:
+            df = pd.DataFrame(columns=["timestamp", "sentiment", "headline_len"])
+        self._news_cache[symbol] = df
+        return df
+
+    @staticmethod
+    def _headline_sentiment(headline: str) -> float:
+        if not headline:
+            return 0.0
+        positive = {
+            "gain",
+            "surge",
+            "beat",
+            "growth",
+            "bull",
+            "strong",
+            "upgrade",
+            "record",
+        }
+        negative = {
+            "loss",
+            "drop",
+            "miss",
+            "bear",
+            "weak",
+            "downgrade",
+            "selloff",
+            "fraud",
+        }
+        text = headline.lower()
+        score = 0
+        for word in positive:
+            if word in text:
+                score += 1
+        for word in negative:
+            if word in text:
+                score -= 1
+        return float(max(min(score / 3.0, 1.0), -1.0))
 
     def _print_coverage_summary(self, market_data: Dict[str, pd.DataFrame]) -> None:
         print("\nCoverage summary per symbol:")
