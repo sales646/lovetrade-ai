@@ -326,29 +326,32 @@ async function runTradingLoop(loopNumber: number) {
         ...sizing,
       });
       
-      // 2.6 Risk Assessment (50% threshold rule)
+      // 2.6 Quantitative Risk Assessment
       await log("INFO", `🛡️ Assessing risk for ${signal.symbol}...`);
-      const { data: riskAssessment } = await supabase.functions.invoke("assess-risk", {
+      const { data: riskAssessment } = await supabase.functions.invoke("quantitative-risk-manager", {
         body: {
-          symbol: signal.symbol,
-          action: signal.action,
-          proposedSize: sizing.final_size,
-          marketData: signal.market_data,
-          timeContext: {
-            minutesSinceOpen: 120, // Mock
-            minutesUntilClose: 210, // Mock
+          signal,
+          account_state: {
+            ...accountState,
+            peak_equity: accountState.equity, // TODO: Track actual peak
           },
         },
       });
+      
+      if (!riskAssessment) {
+        await log("ERROR", "Risk assessment failed");
+        tradesSkipped++;
+        continue;
+      }
       
       // Save risk assessment
       const { data: savedAssessment } = await supabase
         .from("risk_assessments")
         .insert({
           signal_id: signal.id,
-          risk_score: riskAssessment.riskScore,
-          adjusted_size: riskAssessment.adjustedSize,
-          should_execute: riskAssessment.shouldExecute,
+          risk_score: riskAssessment.risk_score,
+          adjusted_size: riskAssessment.adjusted_size,
+          should_execute: riskAssessment.should_execute,
           reason: riskAssessment.reason,
           factors: riskAssessment.factors,
         })
@@ -356,12 +359,11 @@ async function runTradingLoop(loopNumber: number) {
         .single();
       
       // 2.7 Execute Trade
-      if (riskAssessment.shouldExecute) {
-        await log("INFO", `✅ Placing order: ${signal.action.toUpperCase()} ${riskAssessment.adjustedSize.toFixed(0)}% ${signal.symbol}`);
+      if (riskAssessment.should_execute) {
+        await log("INFO", `✅ Executing: ${signal.action.toUpperCase()} ${riskAssessment.adjusted_size} shares ${signal.symbol}`);
+        await log("INFO", `   SL: ${riskAssessment.stop_loss?.toFixed(2)}, TP: ${riskAssessment.take_profit?.toFixed(2)}, Risk Score: ${riskAssessment.risk_score}/100`);
         
-        // Calculate quantity based on position size percentage and account equity
-        const dollarAmount = (accountState.equity * riskAssessment.adjustedSize) / 100;
-        const quantity = Math.floor(dollarAmount / signal.market_data.price);
+        const quantity = Math.floor(riskAssessment.adjusted_size);
         
         // Place real Alpaca order if credentials are configured
         let alpacaOrderId = null;
@@ -388,20 +390,28 @@ async function runTradingLoop(loopNumber: number) {
           risk_assessment_id: savedAssessment.id,
           symbol: signal.symbol,
           action: signal.action,
-          size: riskAssessment.adjustedSize,
+          size: riskAssessment.adjusted_size,
           entry_price: signal.market_data.price,
+          stop_loss: riskAssessment.stop_loss,
+          take_profit: riskAssessment.take_profit,
           status: "open",
-          metadata: { alpaca_order_id: alpacaOrderId, quantity },
         });
         
-        // Create/update position
+        // Create/update position with risk parameters
         await supabase.from("positions").upsert({
           symbol: signal.symbol,
           side: signal.action === "buy" ? "long" : "short",
-          size: riskAssessment.adjustedSize,
+          size: quantity,
           entry_price: signal.market_data.price,
           current_price: signal.market_data.price,
-          quantity,
+          stop_loss: riskAssessment.stop_loss,
+          take_profit: riskAssessment.take_profit,
+          metadata: {
+            atr: riskAssessment.factors?.atr,
+            risk_score: riskAssessment.risk_score,
+            kelly_pct: riskAssessment.factors?.kelly_pct,
+            alpaca_order_id: alpacaOrderId,
+          },
         });
         
         tradesPlaced++;

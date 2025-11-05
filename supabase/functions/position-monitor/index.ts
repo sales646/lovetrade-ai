@@ -59,11 +59,42 @@ serve(async (req) => {
 
       const pnlPercent = ((currentPrice - position.entry_price) / position.entry_price) * 100;
 
+      // Get position metadata for ATR-based trailing stop
+      const metadata = position.metadata || {};
+      const atr = metadata.atr || 0;
+      const initialStopDistance = position.stop_loss 
+        ? Math.abs(position.entry_price - position.stop_loss)
+        : 0;
+      
+      // Calculate ATR-based trailing stop
+      let newStopLoss = position.stop_loss;
+      if (atr > 0 && initialStopDistance > 0) {
+        const trailingDistance = atr * 2; // 2x ATR trailing
+        
+        if (position.side === "long" && pnl > initialStopDistance) {
+          // Move stop up as price increases (only if in profit)
+          const potentialStop = currentPrice - trailingDistance;
+          if (!newStopLoss || potentialStop > newStopLoss) {
+            newStopLoss = potentialStop;
+            console.log(`📈 Trailing stop for ${position.symbol}: ${newStopLoss.toFixed(2)}`);
+          }
+        } else if (position.side === "short" && pnl > initialStopDistance) {
+          // Move stop down as price decreases (only if in profit)
+          const potentialStop = currentPrice + trailingDistance;
+          if (!newStopLoss || potentialStop < newStopLoss) {
+            newStopLoss = potentialStop;
+            console.log(`📉 Trailing stop for ${position.symbol}: ${newStopLoss.toFixed(2)}`);
+          }
+        }
+      }
+
       await supabase
         .from("positions")
         .update({
           current_price: currentPrice,
           unrealized_pnl: pnl,
+          stop_loss: newStopLoss,
+          updated_at: new Date().toISOString(),
         })
         .eq("id", position.id);
 
@@ -71,11 +102,11 @@ serve(async (req) => {
       let shouldClose = false;
       let exitReason = "";
 
-      // Stop Loss
-      if (position.stop_loss) {
+      // Stop Loss (including trailing stop)
+      if (newStopLoss) {
         if (
-          (position.side === "long" && currentPrice <= position.stop_loss) ||
-          (position.side === "short" && currentPrice >= position.stop_loss)
+          (position.side === "long" && currentPrice <= newStopLoss) ||
+          (position.side === "short" && currentPrice >= newStopLoss)
         ) {
           shouldClose = true;
           exitReason = "Stop loss triggered";
@@ -93,12 +124,20 @@ serve(async (req) => {
         }
       }
 
+      // Time-based stop (if position open > 4 hours and losing)
+      const openedAt = new Date(position.opened_at);
+      const hoursOpen = (Date.now() - openedAt.getTime()) / (1000 * 60 * 60);
+      if (hoursOpen > 4 && pnl < 0 && !shouldClose) {
+        shouldClose = true;
+        exitReason = "Time decay - losing position";
+      }
+
       // Time-based exit (end of day)
       const now = new Date();
       const marketClose = new Date(now);
       marketClose.setHours(15, 50, 0, 0); // 3:50 PM - close before market close
 
-      if (now >= marketClose) {
+      if (now >= marketClose && !shouldClose) {
         shouldClose = true;
         exitReason = "End of day exit";
       }
