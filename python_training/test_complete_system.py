@@ -13,11 +13,15 @@ Tests:
 
 import os
 import sys
+import platform
 from dotenv import load_dotenv
 
-print("="*70)
+print("=" * 70)
 print("  COMPLETE SYSTEM TEST")
-print("="*70)
+print("=" * 70)
+print(f"Platform: {platform.system()} {platform.release()}")
+print(f"Python: {sys.version.split()[0]}")
+print()
 
 # Load .env
 load_dotenv()
@@ -206,11 +210,16 @@ try:
 except Exception as e:
     print(f"  ❌ GPU check error: {e}")
 
-print("\n" + "="*70)
+print("\n" + "=" * 70)
 print("  ✅ ALL TESTS PASSED - System Ready!")
-print("="*70)
+print("=" * 70)
 print("\nNext steps:")
-print("  1. Run: ./START_DISTRIBUTED.sh (or .bat on Windows)")
+print("  1. Run: python start_distributed.py")
 print("  2. Monitor training on /strategies dashboard")
 print("  3. Check Supabase training_metrics table")
-print("\n" + "="*70)
+print("\n" + "=" * 70)
+
+if __name__ == "__main__":
+    # Script runs automatically when executed
+    pass
+
