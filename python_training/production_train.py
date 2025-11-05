@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""
-Production Training Script - Uses ONLY real market data
-No simulations, real outcomes only
-"""
+"""Production training script using full-history cached data and stable RL."""
 
+from __future__ import annotations
+
+import math
 import os
-import sys
-import torch
+import random
+from contextlib import nullcontext
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence
+
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -14,7 +18,6 @@ from dotenv import load_dotenv
 from supabase import create_client
 from trading_environment import create_trading_env
 from transformer_policy import TransformerPolicy
-from tqdm import tqdm
 
 from full_history_config import FullHistoryConfig
 from full_history_data import FullHistoryDataManager
@@ -22,10 +25,21 @@ from full_history_data import FullHistoryDataManager
 load_dotenv()
 
 
+@dataclass
+class TrainingMetrics:
+    seed: int
+    best_epoch: int
+    best_sortino: float
+    checkpoint: Path
+    train: Dict[str, float]
+    val: Dict[str, float]
+    test: Dict[str, float]
+
+
 class ProductionTrainer:
-    """Train RL agent on real market data with actual outcomes"""
-    
-    def __init__(self, config: dict):
+    """Train RL agent on real market data with actual outcomes."""
+
+    def __init__(self, config: Dict):
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -55,8 +69,98 @@ class ProductionTrainer:
             os.getenv("SUPABASE_URL"),
             os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         )
-        
-        print(f"🖥️  Device: {self.device}")
+
+        self.rank, self.world_size = self._setup_distributed()
+        self.device = self._resolve_device()
+        self.training_dir = self._resolve_training_dir()
+        self.progress = PhaseProgress()
+        self.supabase = SupabaseLogger()
+
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+        self.training_seeds: Sequence[int] = self.config.get("seeds", [0, 1, 2])
+        self.epochs: int = self.config.get("epochs", 10)
+        self.train_steps_per_epoch: int = self.config.get("steps_per_epoch", 64)
+        self.grad_accum_steps: int = self.config.get("grad_accum_steps", 1)
+        self.grad_clip: float = self.config.get("grad_clip", 1.0)
+        self.entropy_coef: float = self.config.get("entropy_coef", 0.01)
+        self.value_coef: float = self.config.get("value_coef", 0.5)
+        self.discount_gamma: float = self.config.get("gamma", 0.99)
+        self.eval_windows: int = self.config.get("eval_windows", 64)
+        self.patience: int = self.config.get("patience", 12)
+        ppo_cfg = self.config.get("ppo", {})
+        self.clip_range: float = ppo_cfg.get("clip_range", 0.2)
+        self.kl_coef: float = ppo_cfg.get("kl_coef", 1.0)
+        self.kl_target: Optional[float] = ppo_cfg.get("kl_target", 0.01)
+        self.kl_adapt_rate: float = ppo_cfg.get("kl_adapt_rate", 1.5)
+
+        self.market_data: Dict[str, pd.DataFrame] = {}
+        self.env_manifest = pd.DataFrame()
+        self.env_specs: Dict[str, List[Dict]] = {}
+        self.policy: Optional[TransformerPolicy] = None
+        self.optimizer: Optional[torch.optim.Optimizer] = None
+        self.scheduler: Optional[LambdaLR] = None
+        self.bc_metrics: Dict[str, float] = {}
+        self.bc_checkpoint: Optional[Path] = None
+        self.bc_dataset = None
+        self.bc_reference: Optional[TransformerPolicy] = None
+        self.bc_state_dict: Optional[Dict[str, torch.Tensor]] = None
+
+        if self.rank == 0:
+            print(f"🖥️  Device: {self.device}")
+            if torch.cuda.is_available():
+                print(f"   GPU: {torch.cuda.get_device_name(0)}")
+                print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+
+    # ------------------------------------------------------------------
+    # Setup helpers
+    # ------------------------------------------------------------------
+    def _build_history_config(self, overrides: Dict) -> FullHistoryConfig:
+        cfg = FullHistoryConfig()
+        for key, value in overrides.items():
+            setattr(cfg, key, value)
+        return cfg
+
+    def _default_stock_tickers(self) -> List[str]:
+        return [
+            "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD",
+            "SPY", "QQQ", "IWM", "DIA",
+            "JPM", "BAC", "GS", "WFC",
+            "XOM", "CVX", "COP",
+            "UNH", "JNJ", "PFE",
+        ]
+
+    def _default_crypto_tickers(self) -> List[str]:
+        return [
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+            "ADAUSDT", "DOGEUSDT", "MATICUSDT", "DOTUSDT", "AVAXUSDT",
+        ]
+
+    def _setup_distributed(self) -> Sequence[int]:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        rank = int(os.environ.get("RANK", "0"))
+        if world_size > 1 and not dist.is_initialized():
+            backend = "nccl" if torch.cuda.is_available() else "gloo"
+            dist.init_process_group(backend=backend)
+        return rank, world_size
+
+    def _resolve_device(self) -> torch.device:
+        if torch.cuda.is_available():
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            torch.cuda.set_device(local_rank)
+            return torch.device(f"cuda:{local_rank}")
+        return torch.device("cpu")
+
+    def _resolve_training_dir(self) -> Path:
+        directory = Path(self.config.get("training_dir", self.data_manager.cache_dir / "training"))
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def _set_seed(self, seed: int) -> None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
         if torch.cuda.is_available():
             print(f"   GPU: {torch.cuda.get_device_name(0)}")
             print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
@@ -306,9 +410,11 @@ class ProductionTrainer:
         print(f"   Entropy: {entropy.item():.4f}")
         
         return {
-            'policy_loss': policy_loss.item(),
-            'entropy': entropy.item(),
-            'total_loss': loss.item()
+            "sharpe": float(sharpe),
+            "sortino": float(sortino),
+            "max_drawdown": max_drawdown,
+            "hit_rate": hit_rate,
+            "profit_factor": profit_factor,
         }
     
     def evaluate(self, num_episodes: int = 10):
