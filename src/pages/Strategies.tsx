@@ -1,16 +1,34 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useDistributedTrainingStatus, usePBTHistory } from "@/lib/api/distributed-training";
-import { Activity, Cpu, Zap, TrendingUp, Users, Layers } from "lucide-react";
+import { Activity, Cpu, Zap, TrendingUp, Users, Layers, LineChart } from "lucide-react";
+import TrainingProgressCharts from "@/components/TrainingProgressCharts";
 
 export default function Strategies() {
   const { data: distStatus } = useDistributedTrainingStatus();
   const { data: pbtHistory } = usePBTHistory(20);
+  
+  // Get the most recent run ID for charts
+  const latestRunId = distStatus?.recent_runs?.[0]?.id;
 
   return (
     <div className="space-y-6">
-      {/* Distributed Training Status */}
-      <Card>
+      <Tabs defaultValue="overview" className="w-full">
+        <TabsList className="grid w-full grid-cols-2">
+          <TabsTrigger value="overview">
+            <Cpu className="h-4 w-4 mr-2" />
+            Overview
+          </TabsTrigger>
+          <TabsTrigger value="charts">
+            <LineChart className="h-4 w-4 mr-2" />
+            Training Progress
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="overview" className="space-y-6">
+          {/* Distributed Training Status */}
+          <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
@@ -155,35 +173,41 @@ export default function Strategies() {
         </Card>
       )}
 
-      {/* System Info */}
-      <Card>
-        <CardHeader>
-          <CardTitle>System Capabilities</CardTitle>
-          <CardDescription>Distributed training system information</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {distStatus?.system_info && (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-sm">Distributed Training</span>
-                <Badge variant={distStatus.system_info.distributed_available ? "default" : "secondary"}>
-                  {distStatus.system_info.distributed_available ? "Available" : "Not Available"}
-                </Badge>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm">Maximum GPUs</span>
-                <span className="font-mono">{distStatus.system_info.max_gpus}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm">BF16 Precision</span>
-                <Badge variant={distStatus.system_info.bf16_supported ? "default" : "secondary"}>
-                  {distStatus.system_info.bf16_supported ? "Supported" : "Not Supported"}
-                </Badge>
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+          {/* System Info */}
+          <Card>
+            <CardHeader>
+              <CardTitle>System Capabilities</CardTitle>
+              <CardDescription>Distributed training system information</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {distStatus?.system_info && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">Distributed Training</span>
+                    <Badge variant={distStatus.system_info.distributed_available ? "default" : "secondary"}>
+                      {distStatus.system_info.distributed_available ? "Available" : "Not Available"}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">Maximum GPUs</span>
+                    <span className="font-mono">{distStatus.system_info.max_gpus}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">BF16 Precision</span>
+                    <Badge variant={distStatus.system_info.bf16_supported ? "default" : "secondary"}>
+                      {distStatus.system_info.bf16_supported ? "Supported" : "Not Supported"}
+                    </Badge>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="charts" className="space-y-6">
+          <TrainingProgressCharts runId={latestRunId} />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

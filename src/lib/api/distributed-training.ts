@@ -57,20 +57,22 @@ export function useGPUMetrics(runId?: string) {
   return useQuery({
     queryKey: ["gpu-metrics", runId],
     queryFn: async () => {
-      if (!runId) return null;
-
-      const { data, error } = await supabase
+      let query = supabase
         .from("training_metrics")
         .select("*")
-        .eq("run_id", runId)
-        .order("epoch", { ascending: false })
+        .order("created_at", { ascending: false })
         .limit(100);
+      
+      if (runId) {
+        query = query.eq("run_id", runId);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
-      return data;
+      return data || [];
     },
-    enabled: !!runId,
-    refetchInterval: 10000,
+    refetchInterval: 5000, // Poll every 5 seconds for real-time updates
   });
 }
 
