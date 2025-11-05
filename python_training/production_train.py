@@ -29,6 +29,9 @@ from supabase_logger import SupabaseLogger
 from trading_environment import create_trading_env
 from transformer_policy import TransformerPolicy
 
+from full_history_config import FullHistoryConfig
+from full_history_data import FullHistoryDataManager
+
 load_dotenv()
 
 
