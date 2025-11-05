@@ -64,9 +64,10 @@ class DistributedRLOrchestrator:
         from production_data_fetcher import ProductionDataFetcher
         from datetime import datetime, timedelta
         
-        # Get maximum historical data (3 years for stocks, 1 year for crypto)
+        # Yahoo Finance 1-minute data is limited to 7 days
+        # For longer ranges, Polygon S3 and Binance provide historical data
         end_date = datetime.now()
-        start_date = datetime(2021, 1, 1)  # Go back to 2021 for maximum data
+        start_date = end_date - timedelta(days=7)  # Last 7 days for Yahoo 1-min data
         
         fetcher = ProductionDataFetcher(
             start_date=start_date.strftime("%Y-%m-%d"),
@@ -140,14 +141,21 @@ class DistributedRLOrchestrator:
                     'volume': int(row['volume'])
                 })
             
-            # Batch insert (1000 at a time)
+            # Batch insert (1000 at a time) - skip duplicates
             batch_size = 1000
             for i in range(0, len(bars), batch_size):
                 batch = bars[i:i+batch_size]
                 try:
-                    supabase.table('historical_bars').upsert(batch).execute()
+                    # Use upsert with ignore_duplicates to skip existing records
+                    supabase.table('historical_bars').upsert(
+                        batch, 
+                        on_conflict='symbol,timeframe,timestamp',
+                        ignore_duplicates=True
+                    ).execute()
                 except Exception as e:
-                    print(f"  ⚠️ Error storing {symbol} batch {i}: {e}")
+                    # Silently skip duplicate errors, log others
+                    if '23505' not in str(e):  # Not a duplicate key error
+                        print(f"  ⚠️ Error storing {symbol} batch {i}: {e}")
         
         print("✅ Data stored to Supabase")
     

@@ -259,8 +259,8 @@ class ProductionDataFetcher:
                 ticker = yf.Ticker(symbol)
                 
                 # Get both minute and daily data
-                # Minute data (last 30 days only due to Yahoo limits)
-                recent_start = max(self.start_date, datetime.now() - timedelta(days=30))
+                # Minute data (last 7 days only - Yahoo Finance limit)
+                recent_start = max(self.start_date, datetime.now() - timedelta(days=7))
                 df_minute = pd.DataFrame()
                 
                 if recent_start <= self.end_date:

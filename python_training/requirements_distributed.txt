@@ -34,7 +34,7 @@ requests>=2.31.0
 
 # GPU monitoring (nvidia-smi is system-level, this is Python wrapper)
 gpustat>=1.1.0
-pynvml>=11.5.0
+nvidia-ml-py>=12.560.30  # Replaces deprecated pynvml
 
 # Optional: Distributed coordination
 ray[default]>=2.5.0  # For advanced distributed orchestration
