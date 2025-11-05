@@ -1,13 +1,14 @@
 """Full-history data orchestration with caching, features, and windowing."""
 from __future__ import annotations
 
+import io
 import os
 import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -16,10 +17,27 @@ from tqdm import tqdm
 
 from .full_history_config import FullHistoryConfig
 
+try:  # Optional dependency for NYSE calendar
+    import pandas_market_calendars as mcal
+except Exception:  # pragma: no cover - optional dependency
+    mcal = None
+
+try:  # Alternate optional dependency for NYSE calendar
+    import exchange_calendars as xcal
+except Exception:  # pragma: no cover - optional dependency
+    xcal = None
+
 try:  # Optional dependency for Yahoo finance
     import yfinance as yf
 except Exception:  # pragma: no cover - optional dependency
     yf = None
+
+try:  # Optional dependency for Polygon S3
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
+except Exception:  # pragma: no cover - optional dependency
+    boto3 = None
+    BotoCoreError = ClientError = NoCredentialsError = Exception
 
 
 @dataclass
@@ -60,6 +78,11 @@ class FullHistoryDataManager:
 
         self._start_dt = self.config.resolved_datetime(self.config.start)
         self._end_dt = self.config.resolved_datetime(self.config.end)
+        self._trading_days: pd.DatetimeIndex = pd.DatetimeIndex([])
+        self._files_processed: int = 0
+        self._coverage_stats: Dict[str, Dict[str, object]] = {}
+        self._s3_client = None
+        self._s3_client_failed = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -72,6 +95,24 @@ class FullHistoryDataManager:
             for path in [self._sentinel, self._manifest_path, self._feature_path, self._source_path]:
                 if path.exists():
                     path.unlink()
+
+        self._start_dt = self.config.resolved_datetime(self.config.start)
+        self._end_dt = self.config.resolved_datetime(self.config.end)
+
+        if self.config.sanity_mode:
+            self.config.window_size = min(self.config.window_size, self.config.lookback_sanity)
+            self.config.min_bars_for_windowing = min(
+                self.config.min_bars_for_windowing,
+                self.config.lookback_sanity,
+            )
+            self._end_dt = max(
+                self._start_dt,
+                self._start_dt + timedelta(minutes=self.config.lookback_sanity),
+            )
+
+        self._trading_days = self._build_trading_calendar()
+        self._print_range_banner()
+
         if not force and self._can_short_circuit():
             manifest = pd.read_parquet(self._manifest_path)
             market_data = self._load_cached_symbols(manifest)
@@ -87,12 +128,6 @@ class FullHistoryDataManager:
         tickers = sorted(set(self.stocks + self.crypto))
         if self.config.sanity_mode:
             tickers = tickers[:3]
-            self.config.window_size = min(self.config.window_size, self.config.lookback_sanity)
-            self.config.min_bars_for_windowing = min(
-                self.config.min_bars_for_windowing,
-                self.config.lookback_sanity,
-            )
-            self._end_dt = max(self._start_dt, self._start_dt + timedelta(minutes=self.config.lookback_sanity))
 
         if not tickers:
             raise ValueError("No tickers configured for data preparation")
@@ -110,17 +145,59 @@ class FullHistoryDataManager:
     # ------------------------------------------------------------------
     # Fetch helpers
     # ------------------------------------------------------------------
+    def _build_trading_calendar(self) -> pd.DatetimeIndex:
+        start_date = self._start_dt.date()
+        end_date = self._end_dt.date()
+
+        if mcal is not None:
+            cal = mcal.get_calendar("XNYS")
+            schedule = cal.schedule(start_date=start_date, end_date=end_date, tz="UTC")
+            trading_days = schedule.index
+        elif xcal is not None:
+            cal = xcal.get_calendar("XNYS")
+            start_ts = pd.Timestamp(start_date, tz="UTC")
+            end_ts = pd.Timestamp(end_date, tz="UTC")
+            trading_days = cal.sessions_in_range(start_ts, end_ts)
+        else:  # pragma: no cover - optional dependency missing
+            raise RuntimeError(
+                "pandas_market_calendars or exchange_calendars is required for NYSE trading days"
+            )
+
+        trading_days = pd.DatetimeIndex(trading_days)
+        if getattr(trading_days, "tz", None) is not None:
+            trading_days = trading_days.tz_convert("UTC").tz_localize(None)
+
+        if not self.config.sanity_mode and len(trading_days) < 1000:
+            raise RuntimeError("Range resolution bug: expected ≥1500 trading days.")
+
+        return trading_days
+
+    def _print_range_banner(self) -> None:
+        start_str = self._start_dt.date().isoformat()
+        end_str = self._end_dt.date().isoformat()
+        day_strings = [day.strftime("%Y-%m-%d") for day in self._trading_days]
+        first_days = ", ".join(day_strings[:3]) if day_strings else "n/a"
+        last_days = ", ".join(day_strings[-3:]) if day_strings else "n/a"
+        print(
+            f"start_date={start_str}, end_date={end_str}, calendar=XNYS, "
+            f"trading_days={len(self._trading_days)}, first_days=[{first_days}], "
+            f"last_days=[{last_days}]"
+        )
+
     def _fetch_all_symbols(self, tickers: Sequence[str]) -> Dict[str, pd.DataFrame]:
         """Fetch full history for every ticker with a progress bar."""
 
         total_bars = 0
         market_data: Dict[str, pd.DataFrame] = {}
-        coverage_failures: List[str] = []
+        coverage_failures: List[Tuple[str, Dict[str, object]]] = []
+
+        self._files_processed = 0
+        self._coverage_stats = {}
 
         print()
         with tqdm(total=len(tickers), desc="FETCH FULL HISTORY", unit="symbol") as pbar:
             for symbol in tickers:
-                df, source = self._fetch_symbol(symbol)
+                df, source, files_used = self._fetch_symbol(symbol)
                 if df is None or df.empty:
                     pbar.update(1)
                     continue
@@ -130,14 +207,22 @@ class FullHistoryDataManager:
                     pbar.update(1)
                     continue
 
-                coverage = self._coverage_ratio(cleaned)
+                self._files_processed += files_used
                 total_bars += len(cleaned)
                 market_data[symbol] = cleaned
                 self._persist_full_symbol(symbol, cleaned)
                 self._symbol_sources[symbol] = source or "unknown"
 
-                if coverage < self.config.coverage_threshold and not self.config.sanity_mode:
-                    coverage_failures.append(symbol)
+                stats = self._compute_coverage_stats(symbol, cleaned)
+                self._coverage_stats[symbol] = stats
+                if (
+                    not self.config.sanity_mode
+                    and (
+                        stats["unique_days"] < 1000
+                        or stats["coverage_pct"] < self.config.coverage_threshold * 100
+                    )
+                ):
+                    coverage_failures.append((symbol, stats))
 
                 pbar.update(1)
 
@@ -145,17 +230,27 @@ class FullHistoryDataManager:
             raise RuntimeError("No market data available after fetching")
 
         self._print_coverage_summary(market_data)
-        print(f"✅ FETCH DONE — {total_bars:,} bars, {len(market_data)} symbols")
+        print(
+            f"✅ FETCH DONE — {self._files_processed} files, {total_bars:,} bars, "
+            f"days={len(self._trading_days)}"
+        )
         self._persist_sources()
 
         if coverage_failures:
-            raise RuntimeError(
-                "Coverage below threshold for symbols: " + ", ".join(sorted(coverage_failures))
-            )
+            failure_lines = []
+            for symbol, stats in coverage_failures:
+                failure_lines.append(
+                    f"  {symbol}: {stats['coverage_pct']:.2f}% coverage, "
+                    f"unique_days={int(stats['unique_days'])}"
+                )
+            failure_msg = "\n".join(["Coverage validation failed:"] + failure_lines + [
+                "Hint: Check START/END, NYSE calendar, S3 day iteration, Polygon cursor, Binance startTime advancement."
+            ])
+            raise RuntimeError(failure_msg)
 
         return market_data
 
-    def _fetch_symbol(self, symbol: str) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    def _fetch_symbol(self, symbol: str) -> Tuple[Optional[pd.DataFrame], Optional[str], int]:
         """Fetch a symbol from configured sources with fallback."""
 
         is_crypto = symbol in self.crypto or symbol.upper().endswith("USDT")
@@ -182,30 +277,97 @@ class FullHistoryDataManager:
 
         for source in ordered_sources:
             if source == "polygon":
-                df = self._fetch_polygon_symbol(symbol)
+                df, files = self._fetch_polygon_symbol(symbol)
             elif source == "binance":
-                df = self._fetch_binance_symbol(symbol)
+                df, files = self._fetch_binance_symbol(symbol)
             elif source == "yahoo":
-                df = self._fetch_yahoo_symbol(symbol)
+                df, files = self._fetch_yahoo_symbol(symbol)
             else:
                 continue
 
             if df is not None and not df.empty:
                 df["source"] = source
-                return df, source
+                return df, source, files
 
         print(f"⚠️  No data retrieved for {symbol} from any source")
-        return None, None
+        return None, None, 0
 
-    def _fetch_polygon_symbol(self, symbol: str) -> Optional[pd.DataFrame]:
+    def _fetch_polygon_symbol(self, symbol: str) -> Tuple[Optional[pd.DataFrame], int]:
+        df, files = self._fetch_polygon_s3(symbol)
+        if df is not None and not df.empty:
+            return df, files
+
+        api_df, api_files = self._fetch_polygon_api(symbol)
+        return api_df, api_files
+
+    def _fetch_polygon_s3(self, symbol: str) -> Tuple[Optional[pd.DataFrame], int]:
+        client = self._get_s3_client()
+        if client is None or self._trading_days.empty:
+            return None, 0
+
+        bucket = os.getenv("POLYGON_S3_BUCKET", "polygon-data")
+        prefix_base = os.getenv("POLYGON_S3_PREFIX", "stocks/aggregates_v3/1min")
+
+        frames: List[pd.DataFrame] = []
+        files = 0
+        page = 0
+
+        for day in self._trading_days:
+            day_str = day.strftime("%Y-%m-%d")
+            prefix = f"{prefix_base}/{day_str}/"
+            try:
+                keys = self._list_s3_keys(client, bucket, prefix)
+            except Exception as exc:  # pragma: no cover - network
+                print(f"⚠️  Polygon S3 list failed for {symbol} on {day_str}: {exc}")
+                continue
+
+            for key in sorted(keys):
+                if not self._polygon_key_matches_symbol(key, symbol):
+                    continue
+
+                cache_path = self._page_cache_path(symbol, page)
+                if self.config.use_cache and cache_path.exists():
+                    df = pd.read_parquet(cache_path)
+                else:
+                    try:
+                        obj = client.get_object(Bucket=bucket, Key=key)
+                        body = obj["Body"].read()
+                    except Exception as exc:  # pragma: no cover - network
+                        print(f"⚠️  Polygon S3 download failed for {symbol}: {exc}")
+                        continue
+
+                    df = pd.read_parquet(io.BytesIO(body))
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    df.to_parquet(cache_path, index=False)
+
+                if df is None or df.empty:
+                    continue
+
+                frames.append(df)
+                files += 1
+                page += 1
+
+                if self.config.sanity_mode:
+                    break
+
+            if self.config.sanity_mode and frames:
+                break
+
+        if not frames:
+            return None, files
+
+        return pd.concat(frames, ignore_index=True), files
+
+    def _fetch_polygon_api(self, symbol: str) -> Tuple[Optional[pd.DataFrame], int]:
         api_key = os.getenv("POLYGON_API_KEY")
         if not api_key:
-            return None
+            return None, 0
 
         base_url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{self.config.start}/{self.config.end}"
         cursor: Optional[str] = None
         page = 0
         frames: List[pd.DataFrame] = []
+        files = 0
 
         while True:
             cache_path = self._page_cache_path(symbol, page)
@@ -224,7 +386,7 @@ class FullHistoryDataManager:
                 try:
                     response = self._request_with_backoff("get", base_url, params=params)
                 except Exception as exc:
-                    print(f"⚠️  Polygon fetch failed for {symbol}: {exc}")
+                    print(f"⚠️  Polygon API fetch failed for {symbol}: {exc}")
                     break
 
                 payload = response.json()
@@ -257,39 +419,74 @@ class FullHistoryDataManager:
                 break
 
             frames.append(df)
+            files += 1
             page += 1
 
             if not self.config.paginate or not cursor or self.config.sanity_mode:
                 break
 
         if not frames:
+            return None, files
+
+        return pd.concat(frames, ignore_index=True), files
+
+    def _get_s3_client(self):
+        if boto3 is None or self._s3_client_failed:
             return None
+        if self._s3_client is not None:
+            return self._s3_client
+        try:  # pragma: no cover - external dependency
+            self._s3_client = boto3.client("s3")
+        except (BotoCoreError, NoCredentialsError, ClientError) as exc:
+            print(f"⚠️  Polygon S3 client unavailable: {exc}")
+            self._s3_client_failed = True
+            self._s3_client = None
+        return self._s3_client
 
-        return pd.concat(frames, ignore_index=True)
+    @staticmethod
+    def _polygon_key_matches_symbol(key: str, symbol: str) -> bool:
+        filename = key.rsplit("/", 1)[-1]
+        stem = filename.split(".")[0]
+        return stem.upper().startswith(symbol.upper())
 
-    def _fetch_binance_symbol(self, symbol: str) -> Optional[pd.DataFrame]:
-        interval_minutes = 1
+    @staticmethod
+    def _list_s3_keys(client, bucket: str, prefix: str) -> List[str]:
+        keys: List[str] = []
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):  # pragma: no cover - network
+            for entry in page.get("Contents", []):
+                keys.append(entry["Key"])
+        return keys
+
+    def _fetch_binance_symbol(self, symbol: str) -> Tuple[Optional[pd.DataFrame], int]:
         limit = min(self.config.chunk_size, 1000)
-        all_frames: List[pd.DataFrame] = []
-        page = 0
-        current = self._start_dt
-        end_dt = self._end_dt
+        start_ms = int(self._start_dt.timestamp() * 1000)
+        end_ms = int(self._end_dt.timestamp() * 1000)
 
-        while current < end_dt:
+        frames: List[pd.DataFrame] = []
+        files = 0
+        page = 0
+
+        while start_ms < end_ms:
             cache_path = self._page_cache_path(symbol, page)
             if self.config.use_cache and cache_path.exists():
                 df = pd.read_parquet(cache_path)
+                timestamps = pd.to_datetime(df["timestamp"])
+                last_close_ms = int(timestamps.iloc[-1].timestamp() * 1000 + 59_999)
             else:
-                next_time = current + timedelta(minutes=limit * interval_minutes)
                 params = {
                     "symbol": symbol,
                     "interval": "1m",
                     "limit": limit,
-                    "startTime": int(current.timestamp() * 1000),
-                    "endTime": int(min(next_time, end_dt).timestamp() * 1000),
+                    "startTime": start_ms,
+                    "endTime": min(end_ms, start_ms + limit * 60_000),
                 }
                 try:
-                    response = self._request_with_backoff("get", "https://api.binance.com/api/v3/klines", params=params)
+                    response = self._request_with_backoff(
+                        "get",
+                        "https://api.binance.com/api/v3/klines",
+                        params=params,
+                    )
                 except Exception as exc:
                     print(f"⚠️  Binance fetch failed for {symbol}: {exc}")
                     break
@@ -315,7 +512,8 @@ class FullHistoryDataManager:
                         "ignore",
                     ],
                 )
-                df = df[["open_time", "open", "high", "low", "close", "volume"]]
+                last_close_ms = int(df["close_time"].iloc[-1])
+                df = df[["open_time", "open", "high", "low", "close", "volume", "close_time"]]
                 df = df.rename(columns={"open_time": "timestamp"})
                 df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
 
@@ -325,30 +523,31 @@ class FullHistoryDataManager:
             if df is None or df.empty:
                 break
 
-            all_frames.append(df)
+            frames.append(df)
+            files += 1
             page += 1
-            current = current + timedelta(minutes=limit * interval_minutes)
+            start_ms = last_close_ms + 1
 
             if not self.config.paginate or self.config.sanity_mode:
                 break
 
-        if not all_frames:
-            return None
+        if not frames:
+            return None, files
 
-        return pd.concat(all_frames, ignore_index=True)
+        return pd.concat(frames, ignore_index=True), files
 
-    def _fetch_yahoo_symbol(self, symbol: str) -> Optional[pd.DataFrame]:
+    def _fetch_yahoo_symbol(self, symbol: str) -> Tuple[Optional[pd.DataFrame], int]:
         if yf is None:
-            return None
+            return None, 0
 
         try:
             ticker = yf.Ticker(symbol)
             df = ticker.history(interval="1m", start=self.config.start, end=self.config.end)
         except Exception:
-            return None
+            return None, 0
 
         if df.empty:
-            return None
+            return None, 0
 
         df = df.rename(
             columns={
@@ -360,7 +559,7 @@ class FullHistoryDataManager:
             }
         )
         df = df.reset_index().rename(columns={"Datetime": "timestamp"})
-        return df
+        return df, 1
 
     def _request_with_backoff(self, method: str, url: str, **kwargs) -> requests.Response:
         delay = self.config.initial_backoff
@@ -562,26 +761,66 @@ class FullHistoryDataManager:
             df[col] = series.clip(lower=q_low, upper=q_high)
         return df
 
-    def _coverage_ratio(self, df: pd.DataFrame) -> float:
-        if df.empty:
-            return 0.0
-        expected_minutes = max(1, int(((self._end_dt - self._start_dt).total_seconds() / 60)) + 1)
-        return min(1.0, len(df) / expected_minutes)
-
     def _print_coverage_summary(self, market_data: Dict[str, pd.DataFrame]) -> None:
         print("\nCoverage summary per symbol:")
         for symbol, df in market_data.items():
-            first_ts = df["timestamp"].iloc[0]
-            last_ts = df["timestamp"].iloc[-1]
-            coverage = self._coverage_ratio(df) * 100
+            stats = self._coverage_stats.get(symbol) or self._compute_coverage_stats(symbol, df)
             source = self._symbol_sources.get(symbol, "unknown")
             print(
-                f"  {symbol}: {first_ts} → {last_ts} — {len(df):,} bars "
-                f"({coverage:.1f}% coverage) [{source}]"
+                f"  {symbol}: {stats['first_ts']} → {stats['last_ts']} — {int(stats['bars']):,} bars "
+                f"({stats['coverage_pct']:.2f}% coverage, unique_days={int(stats['unique_days'])}, "
+                f"expected_days={int(stats['expected_days'])}) [{source}]"
             )
 
     def _page_cache_path(self, symbol: str, page: int) -> Path:
-        return self._symbol_cache_dir(symbol) / f"p{page:04d}.parquet"
+        directory = self._symbol_cache_dir(symbol)
+        directory.mkdir(parents=True, exist_ok=True)
+        new_name = (
+            f"{symbol}_{self.config.timeframe}_{self.config.start}_{self.config.end}_p{page:04d}.parquet"
+        )
+        new_path = directory / new_name
+        legacy_path = directory / f"p{page:04d}.parquet"
+        if legacy_path.exists() and not new_path.exists():
+            return legacy_path
+        return new_path
+
+    def _compute_coverage_stats(self, symbol: str, df: pd.DataFrame) -> Dict[str, Any]:
+        if df.empty:
+            return {
+                "first_ts": None,
+                "last_ts": None,
+                "unique_days": 0,
+                "bars": 0,
+                "coverage_pct": 0.0,
+                "expected_days": len(self._trading_days),
+                "is_crypto": self._is_crypto_symbol(symbol),
+            }
+
+        timestamps = pd.to_datetime(df["timestamp"])
+        unique_days = int(timestamps.dt.normalize().nunique())
+        bars = int(len(df))
+
+        is_crypto = self._is_crypto_symbol(symbol)
+        if is_crypto:
+            total_minutes = max(1, int((self._end_dt - self._start_dt).total_seconds() / 60) + 1)
+            coverage = min(1.0, bars / total_minutes)
+            expected_days = (self._end_dt.date() - self._start_dt.date()).days + 1
+        else:
+            expected_days = len(self._trading_days)
+            coverage = min(1.0, unique_days / expected_days) if expected_days else 0.0
+
+        return {
+            "first_ts": timestamps.iloc[0],
+            "last_ts": timestamps.iloc[-1],
+            "unique_days": unique_days,
+            "bars": bars,
+            "coverage_pct": coverage * 100,
+            "expected_days": expected_days,
+            "is_crypto": is_crypto,
+        }
+
+    def _is_crypto_symbol(self, symbol: str) -> bool:
+        return symbol in self.crypto or symbol.upper().endswith("USDT")
 
     def _symbol_cache_dir(self, symbol: str) -> Path:
         return self.cache_dir / symbol / self.config.timeframe / f"{self.config.start}_{self.config.end}"
