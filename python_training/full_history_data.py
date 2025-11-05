@@ -1,16 +1,46 @@
-"""Full-history data orchestration with caching, pagination and window manifest."""
+"""Full-history data orchestration with caching, features, and windowing."""
 from __future__ import annotations
 
+import io
 import os
+import random
+import shutil
+import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple
 
+import numpy as np
 import pandas as pd
 import requests
+from tqdm import tqdm
 
 from .full_history_config import FullHistoryConfig
+from .progress import PhaseProgress
+
+try:  # Optional dependency for NYSE calendar
+    import pandas_market_calendars as mcal
+except Exception:  # pragma: no cover - optional dependency
+    mcal = None
+
+try:  # Alternate optional dependency for NYSE calendar
+    import exchange_calendars as xcal
+except Exception:  # pragma: no cover - optional dependency
+    xcal = None
+
+try:  # Optional dependency for Yahoo finance
+    import yfinance as yf
+except Exception:  # pragma: no cover - optional dependency
+    yf = None
+
+try:  # Optional dependency for Polygon S3
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
+except Exception:  # pragma: no cover - optional dependency
+    boto3 = None
+    BotoCoreError = ClientError = NoCredentialsError = Exception
 
 
 @dataclass
@@ -21,11 +51,12 @@ class WindowSpec:
     end_idx: int
     start_ts: datetime
     end_ts: datetime
+    regime: str
     data_path: str
 
 
 class FullHistoryDataManager:
-    """Handles fetching, caching and manifest generation for market data."""
+    """Handles fetching, caching, feature building, and manifest generation."""
 
     def __init__(
         self,
@@ -38,89 +69,356 @@ class FullHistoryDataManager:
         self.config.ensure_cache_dir()
 
         self.cache_dir: Path = self.config.cache_path
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
         self.stocks = list(stocks or [])
         self.crypto = list(crypto or [])
-
         self._sentinel = self.cache_dir / ".prep_done"
         self._manifest_path = self.cache_dir / "env_manifest.parquet"
+        self._feature_path = self.cache_dir / "feature_columns.txt"
+        self._source_path = self.cache_dir / "sources.json"
+        self._symbol_sources: Dict[str, str] = {}
+
+        self._start_dt = self.config.resolved_datetime(self.config.start)
+        self._end_dt = self.config.resolved_datetime(self.config.end)
+        self._trading_days: pd.DatetimeIndex = pd.DatetimeIndex([])
+        self._files_processed: int = 0
+        self._coverage_stats: Dict[str, Dict[str, object]] = {}
+        self._s3_client = None
+        self._s3_client_failed = False
+        self._progress: Optional[PhaseProgress] = None
+        self._news_cache: Dict[str, pd.DataFrame] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def prepare(self) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
-        """Prepare full-history data and return market data + manifest."""
-        if self._can_short_circuit():
-            manifest = pd.read_parquet(self._manifest_path)
-            market_data = self._load_cached_symbols(manifest)
-            return market_data, manifest
+    def _start_phase(self, name: str, total: Optional[int] = None, unit: Optional[str] = None) -> None:
+        if self._progress:
+            self._progress.start(name, total=total, unit=unit)
 
-        tickers = sorted(set(self.stocks + self.crypto))
+    def _advance_phase(self, name: str, increment: int = 1) -> None:
+        if self._progress:
+            self._progress.update(name, increment)
+
+    def _close_phase(self, name: str) -> None:
+        if self._progress:
+            self._progress.close(name)
+
+    def _phase_hook(self, name: str) -> Callable[[float], None]:
+        def hook(increment: float) -> None:
+            if increment <= 0:
+                return
+            self._advance_phase(name, int(increment))
+
+        return hook
+
+    def prepare(
+        self,
+        force_full_prep: Optional[bool] = None,
+        progress: Optional[PhaseProgress] = None,
+    ) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
+        """Prepare full-history data and return market data and manifest."""
+
+        force = force_full_prep if force_full_prep is not None else self.config.force_full_prep
+        if progress is not None:
+            self._progress = progress
+        if force:
+            for path in [self._sentinel, self._manifest_path, self._feature_path, self._source_path]:
+                if path.exists():
+                    path.unlink()
+            for symbol in set(self.stocks + self.crypto):
+                cache_root = self._symbol_cache_dir(symbol)
+                if cache_root.exists():
+                    shutil.rmtree(cache_root, ignore_errors=True)
+
+        self._start_dt = self.config.resolved_datetime(self.config.start)
+        self._end_dt = self.config.resolved_datetime(self.config.end)
+
         if self.config.sanity_mode:
-            tickers = tickers[:3]
             self.config.window_size = min(self.config.window_size, self.config.lookback_sanity)
             self.config.min_bars_for_windowing = min(
                 self.config.min_bars_for_windowing,
                 self.config.lookback_sanity,
             )
+            self._end_dt = max(
+                self._start_dt,
+                self._start_dt + timedelta(minutes=self.config.lookback_sanity),
+            )
 
-        if not tickers:
-            raise ValueError("No tickers configured for data preparation")
+        original_use_cache = self.config.use_cache
+        if force:
+            self.config.use_cache = False
 
-        print(f"📥 Fetching data for {len(tickers)} tickers ({self.config.timeframe})")
+        try:
+            self._trading_days = self._build_trading_calendar()
+            self._print_range_banner()
 
-        market_data: Dict[str, pd.DataFrame] = {}
-        crypto_set = set(self.crypto)
+            if not force and self._can_short_circuit():
+                manifest = pd.read_parquet(self._manifest_path)
+                market_data = self._load_cached_symbols(manifest)
+                feature_columns = self._load_feature_columns()
+                self._symbol_sources = self._load_sources()
+                if feature_columns:
+                    for df in market_data.values():
+                        missing = [col for col in feature_columns if col not in df.columns]
+                        for col in missing:
+                            df[col] = np.nan
+                return market_data, manifest
 
-        for symbol in tickers:
-            if symbol in crypto_set or symbol.upper().endswith("USDT"):
-                df = self._fetch_binance_symbol(symbol)
-            else:
-                df = self._fetch_polygon_symbol(symbol)
+            tickers = sorted(set(self.stocks + self.crypto))
+            if self.config.sanity_mode:
+                tickers = tickers[:3]
 
-            if df is None or df.empty:
-                continue
+            if not tickers:
+                raise ValueError("No tickers configured for data preparation")
 
-            cleaned = self._clean_dataframe(df)
-            if cleaned.empty:
-                continue
+            market_data = self._fetch_all_symbols(tickers)
+            market_data = self._build_features(market_data)
+            manifest = self._build_manifest(market_data)
 
-            if len(cleaned) < self.config.window_size:
-                continue
+            manifest.to_parquet(self._manifest_path, index=False)
+            self._persist_feature_columns(market_data)
+            self._sentinel.touch()
 
-            market_data[symbol] = cleaned
-            self._persist_full_symbol(symbol, cleaned)
-
-        if not market_data:
-            raise RuntimeError("No market data available after fetching")
-
-        manifest = self._build_manifest(market_data)
-        manifest.to_parquet(self._manifest_path, index=False)
-        self._sentinel.touch()
-
-        return market_data, manifest
+            return market_data, manifest
+        finally:
+            self.config.use_cache = original_use_cache
+            if progress is not None:
+                self._progress = None
 
     # ------------------------------------------------------------------
     # Fetch helpers
     # ------------------------------------------------------------------
-    def _fetch_polygon_symbol(self, symbol: str) -> Optional[pd.DataFrame]:
-        api_key = os.getenv("POLYGON_API_KEY")
-        if not api_key:
-            print(f"⚠️  POLYGON_API_KEY missing, skipping {symbol}")
-            return None
+    def _build_trading_calendar(self) -> pd.DatetimeIndex:
+        start_date = self._start_dt.date()
+        end_date = self._end_dt.date()
 
-        start = self.config.start
-        end = self.config.end
-        base_url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{start}/{end}"
+        if mcal is not None:
+            cal = mcal.get_calendar("XNYS")
+            schedule = cal.schedule(start_date=start_date, end_date=end_date, tz="UTC")
+            trading_days = schedule.index
+        elif xcal is not None:
+            cal = xcal.get_calendar("XNYS")
+            start_ts = pd.Timestamp(start_date, tz="UTC")
+            end_ts = pd.Timestamp(end_date, tz="UTC")
+            trading_days = cal.sessions_in_range(start_ts, end_ts)
+        else:  # pragma: no cover - optional dependency missing
+            raise RuntimeError(
+                "pandas_market_calendars or exchange_calendars is required for NYSE trading days"
+            )
 
-        all_frames: List[pd.DataFrame] = []
-        cursor: Optional[str] = None
+        trading_days = pd.DatetimeIndex(trading_days)
+        if getattr(trading_days, "tz", None) is not None:
+            trading_days = trading_days.tz_convert("UTC").tz_localize(None)
+
+        if not self.config.sanity_mode and len(trading_days) < 1500:
+            raise RuntimeError("Range resolution bug — expected ≥1500 trading days for 2019–2025")
+
+        return trading_days
+
+    def _print_range_banner(self) -> None:
+        start_str = self._start_dt.date().isoformat()
+        end_str = self._end_dt.date().isoformat()
+        day_strings = [day.strftime("%Y-%m-%d") for day in self._trading_days]
+        first_days = day_strings[:5]
+        last_days = day_strings[-5:]
+        print(f"⚙️ START_DATE={start_str}, END_DATE={end_str}")
+        print("calendar=XNYS")
+        print(f"🗓️ Trading days: {len(self._trading_days)}")
+        print(f"First 5: {first_days}")
+        print(f"Last 5: {last_days}")
+
+    def _fetch_all_symbols(self, tickers: Sequence[str]) -> Dict[str, pd.DataFrame]:
+        """Fetch full history for every ticker with a single phase progress bar."""
+
+        total_bars = 0
+        market_data: Dict[str, pd.DataFrame] = {}
+        self._files_processed = 0
+        self._coverage_stats = {}
+
+        total_days = max(1, len(self._trading_days)) * max(1, len(tickers))
+        self._start_phase("FETCH FULL HISTORY", total=total_days, unit="day")
+        progress_hook = self._phase_hook("FETCH FULL HISTORY")
+
+        for symbol in tickers:
+            df, source, files_used = self._fetch_symbol(symbol, progress_hook=progress_hook)
+
+            if df is None or df.empty:
+                continue
+
+            self._files_processed += files_used
+            total_bars += len(df)
+            market_data[symbol] = df
+            self._persist_full_symbol(symbol, df)
+            self._symbol_sources[symbol] = source or "unknown"
+
+            stats = self._compute_coverage_stats(symbol, df)
+            self._coverage_stats[symbol] = stats
+            if (
+                not self.config.sanity_mode
+                and (
+                    stats["unique_days"] < 1000
+                    or stats["coverage_pct"] < self.config.coverage_threshold * 100
+                )
+            ):
+                self._report_coverage_failure(symbol, stats)
+                self._close_phase("FETCH FULL HISTORY")
+                raise RuntimeError(
+                    "Coverage too low — check date resolution, S3 loop, Yahoo merge (no inner join)"
+                )
+
+        self._close_phase("FETCH FULL HISTORY")
+
+        if not market_data:
+            raise RuntimeError("No market data available after fetching")
+
+        self._print_coverage_summary(market_data)
+        self._persist_sources()
+        print(
+            f"✅ FETCH DONE — files={self._files_processed}, bars={total_bars:,}, "
+            f"days={len(self._trading_days)}"
+        )
+
+        return market_data
+
+    def _fetch_symbol(
+        self,
+        symbol: str,
+        progress_hook: Optional[Callable[[float], None]] = None,
+    ) -> Tuple[Optional[pd.DataFrame], Optional[str], int]:
+        """Fetch a symbol from configured sources with fallback."""
+
+        if self._is_crypto_symbol(symbol):
+            df, files = self._fetch_binance_symbol(symbol, progress_hook=progress_hook)
+            if df is None or df.empty:
+                print(f"⚠️  No Binance data retrieved for {symbol}")
+                return None, None, files
+
+            cleaned = self._clean_dataframe(df)
+            return cleaned, "binance", files
+
+        polygon_df, files = self._fetch_polygon_symbol(symbol, progress_hook=progress_hook)
+        if polygon_df is None or polygon_df.empty:
+            print(
+                f"⚠️  Polygon data unavailable for {symbol} within {self.config.start} → {self.config.end}"
+            )
+            return None, None, files
+
+        cleaned = self._clean_dataframe(polygon_df)
+        source = "polygon"
+
+        yahoo_df, yahoo_files = self._fetch_yahoo_symbol(symbol)
+        if yahoo_df is not None and not yahoo_df.empty:
+            merged, used_yahoo = self._merge_polygon_with_yahoo(cleaned, yahoo_df, symbol)
+            if used_yahoo:
+                cleaned = merged
+                files += yahoo_files
+                source = "polygon+yahoo"
+
+        return cleaned, source, files
+
+    def _fetch_polygon_symbol(
+        self,
+        symbol: str,
+        progress_hook: Optional[Callable[[float], None]] = None,
+    ) -> Tuple[Optional[pd.DataFrame], int]:
+        df, files = self._fetch_polygon_s3(symbol, progress_hook=progress_hook)
+        if df is not None and not df.empty:
+            return df, files
+
+        if progress_hook is not None:
+            progress_hook(len(self._trading_days) or 0)
+
+        api_df, api_files = self._fetch_polygon_api(symbol)
+        return api_df, api_files
+
+    def _fetch_polygon_s3(
+        self,
+        symbol: str,
+        progress_hook: Optional[Callable[[float], None]] = None,
+    ) -> Tuple[Optional[pd.DataFrame], int]:
+        client = self._get_s3_client()
+        if client is None or self._trading_days.empty:
+            return None, 0
+
+        bucket = os.getenv("POLYGON_S3_BUCKET", "polygon-data")
+        prefix_base = os.getenv("POLYGON_S3_PREFIX", "stocks/aggregates_v3/1min")
+
+        frames: List[pd.DataFrame] = []
+        files = 0
         page = 0
 
+        for day in self._trading_days:
+            day_str = day.strftime("%Y-%m-%d")
+            prefix = f"{prefix_base}/{day_str}/"
+            try:
+                keys = self._list_s3_keys(client, bucket, prefix)
+            except Exception as exc:  # pragma: no cover - network
+                print(f"⚠️  Polygon S3 list failed for {symbol} on {day_str}: {exc}")
+                continue
+
+            for key in sorted(keys):
+                if not self._polygon_key_matches_symbol(key, symbol):
+                    continue
+
+                cache_path = self._page_cache_path(symbol, page)
+                if self.config.use_cache and cache_path.exists():
+                    df = pd.read_parquet(cache_path)
+                else:
+                    try:
+                        obj = client.get_object(Bucket=bucket, Key=key)
+                        body = obj["Body"].read()
+                    except Exception as exc:  # pragma: no cover - network
+                        print(f"⚠️  Polygon S3 download failed for {symbol}: {exc}")
+                        continue
+
+                    df = pd.read_parquet(io.BytesIO(body))
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    df.to_parquet(cache_path, index=False)
+
+                if df is None or df.empty:
+                    continue
+
+                frames.append(df)
+                files += 1
+                page += 1
+
+                if self.config.sanity_mode:
+                    break
+
+            if self.config.sanity_mode and frames:
+                break
+
+            if progress_hook is not None:
+                progress_hook(1)
+
+        if not frames:
+            return None, files
+
+        return pd.concat(frames, ignore_index=True), files
+
+    def _fetch_polygon_api(self, symbol: str) -> Tuple[Optional[pd.DataFrame], int]:
+        api_key = os.getenv("POLYGON_API_KEY")
+        if not api_key:
+            return None, 0
+
+        base_url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/minute/{self.config.start}/{self.config.end}"
+        cursor: Optional[str] = None
+        page = 0
+        frames: List[pd.DataFrame] = []
+        files = 0
+
+        loaded_cache_any = False
         while True:
             cache_path = self._page_cache_path(symbol, page)
+            used_cache = False
             if self.config.use_cache and cache_path.exists():
                 df = pd.read_parquet(cache_path)
+                used_cache = True
+                loaded_cache_any = True
             else:
+                if loaded_cache_any and cursor is None and self.config.use_cache:
+                    break
                 params = {
                     "adjusted": "true",
                     "limit": min(self.config.chunk_size, 50_000),
@@ -131,10 +429,9 @@ class FullHistoryDataManager:
                     params["cursor"] = cursor
 
                 try:
-                    response = requests.get(base_url, params=params, timeout=30)
-                    response.raise_for_status()
+                    response = self._request_with_backoff("get", base_url, params=params)
                 except Exception as exc:
-                    print(f"⚠️  Polygon fetch failed for {symbol}: {exc}")
+                    print(f"⚠️  Polygon API fetch failed for {symbol}: {exc}")
                     break
 
                 payload = response.json()
@@ -159,56 +456,107 @@ class FullHistoryDataManager:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 df.to_parquet(cache_path, index=False)
 
-                cursor = payload.get("next_page_token")
-                if not cursor:
-                    next_url = payload.get("next_url")
-                    if next_url and "cursor=" in next_url:
-                        cursor = next_url.split("cursor=")[-1]
+                cursor = payload.get("next_page_token") or payload.get("next_url")
+                if cursor and "cursor=" in cursor:
+                    cursor = cursor.split("cursor=")[-1]
 
             if df is None or df.empty:
                 break
 
-            all_frames.append(df)
+            frames.append(df)
+            files += 1
             page += 1
 
-            if not self.config.paginate or not cursor:
+            if used_cache:
+                continue
+
+            if not cursor or self.config.sanity_mode:
                 break
 
-            if self.config.sanity_mode:
-                break
+        if not frames:
+            return None, files
 
-        if not all_frames:
+        return pd.concat(frames, ignore_index=True), files
+
+    def _get_s3_client(self):
+        if boto3 is None or self._s3_client_failed:
             return None
+        if self._s3_client is not None:
+            return self._s3_client
 
-        combined = pd.concat(all_frames, ignore_index=True)
-        return combined
+        client_kwargs: Dict[str, Any] = {}
+        endpoint = os.getenv("POLYGON_S3_ENDPOINT") or os.getenv("S3_ENDPOINT")
+        access_key = os.getenv("POLYGON_S3_ACCESS_KEY") or os.getenv("AWS_ACCESS_KEY_ID")
+        secret_key = os.getenv("POLYGON_S3_SECRET_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
+        session_token = os.getenv("POLYGON_S3_SESSION_TOKEN") or os.getenv("AWS_SESSION_TOKEN")
+        region = os.getenv("POLYGON_S3_REGION") or os.getenv("AWS_REGION")
 
-    def _fetch_binance_symbol(self, symbol: str) -> Optional[pd.DataFrame]:
-        start_dt = self.config.resolved_datetime(self.config.start)
-        end_dt = self.config.resolved_datetime(self.config.end)
+        if endpoint:
+            client_kwargs["endpoint_url"] = endpoint
+        if access_key and secret_key:
+            client_kwargs["aws_access_key_id"] = access_key
+            client_kwargs["aws_secret_access_key"] = secret_key
+        if session_token:
+            client_kwargs["aws_session_token"] = session_token
+        if region:
+            client_kwargs["region_name"] = region
 
-        interval_minutes = 1
+        try:  # pragma: no cover - external dependency
+            self._s3_client = boto3.client("s3", **client_kwargs)
+        except (BotoCoreError, NoCredentialsError, ClientError) as exc:
+            print(f"⚠️  Polygon S3 client unavailable: {exc}")
+            self._s3_client_failed = True
+            self._s3_client = None
+        return self._s3_client
+
+    @staticmethod
+    def _polygon_key_matches_symbol(key: str, symbol: str) -> bool:
+        filename = key.rsplit("/", 1)[-1]
+        stem = filename.split(".")[0]
+        return stem.upper().startswith(symbol.upper())
+
+    @staticmethod
+    def _list_s3_keys(client, bucket: str, prefix: str) -> List[str]:
+        keys: List[str] = []
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):  # pragma: no cover - network
+            for entry in page.get("Contents", []):
+                keys.append(entry["Key"])
+        return keys
+
+    def _fetch_binance_symbol(
+        self,
+        symbol: str,
+        progress_hook: Optional[Callable[[float], None]] = None,
+    ) -> Tuple[Optional[pd.DataFrame], int]:
         limit = min(self.config.chunk_size, 1000)
-        all_frames: List[pd.DataFrame] = []
-        page = 0
-        current = start_dt
+        start_ms = int(self._start_dt.timestamp() * 1000)
+        end_ms = int(self._end_dt.timestamp() * 1000)
 
-        while current < end_dt:
+        frames: List[pd.DataFrame] = []
+        files = 0
+        page = 0
+
+        while start_ms < end_ms:
             cache_path = self._page_cache_path(symbol, page)
             if self.config.use_cache and cache_path.exists():
                 df = pd.read_parquet(cache_path)
+                timestamps = pd.to_datetime(df["timestamp"])
+                last_close_ms = int(timestamps.iloc[-1].timestamp() * 1000 + 59_999)
             else:
-                next_time = current + timedelta(minutes=limit * interval_minutes)
                 params = {
                     "symbol": symbol,
                     "interval": "1m",
                     "limit": limit,
-                    "startTime": int(current.timestamp() * 1000),
-                    "endTime": int(min(next_time, end_dt).timestamp() * 1000),
+                    "startTime": start_ms,
+                    "endTime": min(end_ms, start_ms + limit * 60_000),
                 }
                 try:
-                    response = requests.get("https://api.binance.com/api/v3/klines", params=params, timeout=30)
-                    response.raise_for_status()
+                    response = self._request_with_backoff(
+                        "get",
+                        "https://api.binance.com/api/v3/klines",
+                        params=params,
+                    )
                 except Exception as exc:
                     print(f"⚠️  Binance fetch failed for {symbol}: {exc}")
                     break
@@ -234,7 +582,8 @@ class FullHistoryDataManager:
                         "ignore",
                     ],
                 )
-                df = df[["open_time", "open", "high", "low", "close", "volume"]]
+                last_close_ms = int(df["close_time"].iloc[-1])
+                df = df[["open_time", "open", "high", "low", "close", "volume", "close_time"]]
                 df = df.rename(columns={"open_time": "timestamp"})
                 df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
 
@@ -244,71 +593,151 @@ class FullHistoryDataManager:
             if df is None or df.empty:
                 break
 
-            all_frames.append(df)
+            frames.append(df)
+            files += 1
             page += 1
-            current = current + timedelta(minutes=limit * interval_minutes)
-
-            if not self.config.paginate:
-                break
+            start_ms = last_close_ms + 1
 
             if self.config.sanity_mode:
                 break
 
-        if not all_frames:
-            return None
+        if not frames:
+            return None, files
 
-        combined = pd.concat(all_frames, ignore_index=True)
-        return combined
+        if progress_hook is not None:
+            progress_hook(len(self._trading_days) or 0)
+
+        return pd.concat(frames, ignore_index=True), files
+
+    def _fetch_yahoo_symbol(self, symbol: str) -> Tuple[Optional[pd.DataFrame], int]:
+        if yf is None:
+            return None, 0
+
+        try:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(interval="1m", start=self.config.start, end=self.config.end)
+        except Exception:
+            return None, 0
+
+        if df.empty:
+            return None, 0
+
+        df = df.rename(
+            columns={
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume",
+            }
+        )
+        df = df.reset_index().rename(columns={"Datetime": "timestamp"})
+        return df, 1
+
+    def _merge_polygon_with_yahoo(
+        self,
+        polygon_df: pd.DataFrame,
+        yahoo_raw: pd.DataFrame,
+        symbol: str,
+    ) -> Tuple[pd.DataFrame, bool]:
+        yahoo_clean = self._clean_dataframe(yahoo_raw)
+        if yahoo_clean.empty:
+            return polygon_df, False
+
+        polygon_df = polygon_df.sort_values("timestamp").reset_index(drop=True)
+        yahoo_clean = yahoo_clean.sort_values("timestamp").reset_index(drop=True)
+
+        polygon_df = polygon_df.assign(_priority=0)
+        yahoo_clean = yahoo_clean.assign(_priority=1)
+
+        combined = pd.concat([polygon_df, yahoo_clean], ignore_index=True)
+        combined = combined.sort_values(["timestamp", "_priority"])
+        combined = combined.drop_duplicates("timestamp", keep="first")
+        combined = combined.drop(columns="_priority")
+
+        polygon_days = polygon_df["timestamp"].dt.normalize().nunique()
+        polygon_rows = len(polygon_df)
+        combined_days = combined["timestamp"].dt.normalize().nunique()
+        combined_rows = len(combined)
+
+        if combined_rows < polygon_rows or combined_days < polygon_days:
+            print(
+                f"⚠️  Skipping Yahoo gap fill for {symbol}: merge reduced coverage"
+            )
+            return polygon_df, False
+
+        return combined, True
+
+    def _request_with_backoff(self, method: str, url: str, **kwargs) -> requests.Response:
+        delay = self.config.initial_backoff
+        attempt = 0
+        while True:
+            try:
+                response = requests.request(method, url, timeout=kwargs.pop("timeout", 30), **kwargs)
+                if response.status_code == 429:
+                    raise requests.HTTPError("rate limited", response=response)
+                response.raise_for_status()
+                return response
+            except Exception as exc:
+                attempt += 1
+                if attempt >= self.config.max_retries:
+                    raise
+                jitter = random.uniform(0, delay)
+                time.sleep(delay + jitter)
+                delay = min(delay * 2, self.config.max_backoff)
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Feature engineering
     # ------------------------------------------------------------------
-    def _page_cache_path(self, symbol: str, page: int) -> Path:
-        filename = f"{symbol}_{self.config.timeframe}_{self.config.start}_{self.config.end}_p{page:04d}.parquet"
-        return self.cache_dir / filename
+    def _build_features(self, market_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+        feature_columns_set: Set[str] = set()
+        enriched: Dict[str, pd.DataFrame] = {}
 
-    def _full_symbol_path(self, symbol: str) -> Path:
-        filename = f"{symbol}_{self.config.timeframe}_{self.config.start}_{self.config.end}_full.parquet"
-        return self.cache_dir / filename
+        self._start_phase("FEATURE BUILD", total=len(market_data), unit="symbol")
+        for symbol, df in market_data.items():
+            bars = df.copy()
+            bars = bars.sort_values("timestamp").reset_index(drop=True)
 
-    def _persist_full_symbol(self, symbol: str, df: pd.DataFrame) -> None:
-        path = self._full_symbol_path(symbol)
-        df.to_parquet(path, index=False)
+            bars["log_return"] = np.log(bars["close"]).diff().fillna(0.0)
+            bars["pct_change"] = bars["close"].pct_change().fillna(0.0)
+            bars["rolling_vol_64"] = (
+                bars["log_return"].rolling(64, min_periods=8).std().fillna(method="bfill").fillna(0.0)
+            )
+            bars["rolling_vol_256"] = (
+                bars["log_return"].rolling(256, min_periods=32).std().fillna(method="bfill").fillna(0.0)
+            )
+            bars["rolling_mean_32"] = (
+                bars["close"].rolling(32, min_periods=8).mean().fillna(method="bfill").fillna(method="ffill")
+            )
+            bars["rolling_mean_128"] = (
+                bars["close"].rolling(128, min_periods=32).mean().fillna(method="bfill").fillna(method="ffill")
+            )
+            rolling_vol = bars["volume"].rolling(128, min_periods=32)
+            bars["volume_zscore"] = (bars["volume"] - rolling_vol.mean()) / rolling_vol.std().replace(0, np.nan)
+            bars["volume_zscore"] = bars["volume_zscore"].fillna(0.0)
+            bars["high_low_range"] = (bars["high"] - bars["low"]) / bars["close"].replace(0, np.nan)
+            bars["high_low_range"] = bars["high_low_range"].fillna(0.0)
 
-    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        keep_cols = ["timestamp", "open", "high", "low", "close", "volume"]
-        df = df.copy()
+            bars = self._attach_news_features(symbol, bars)
+            bars = self._clip_outliers(bars)
 
-        # Normalize column names
-        rename_map = {col: col.lower() for col in df.columns}
-        df = df.rename(columns=rename_map)
+            feature_columns = [
+                col for col in bars.columns if col not in {"timestamp", "open", "high", "low", "close", "volume"}
+            ]
+            feature_columns_set.update(feature_columns)
+            enriched[symbol] = bars
+            self._persist_full_symbol(symbol, bars)
+            self._advance_phase("FEATURE BUILD")
 
-        if "t" in df.columns and "timestamp" not in df.columns:
-            df["timestamp"] = pd.to_datetime(df["t"], unit="ms")
-        if "time" in df.columns and "timestamp" not in df.columns:
-            df["timestamp"] = pd.to_datetime(df["time"])
+        self._close_phase("FEATURE BUILD")
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
-        df = df.sort_values("timestamp").drop_duplicates("timestamp")
+        feature_count = len(feature_columns_set)
+        print(f"✅ FEATURES DONE — {feature_count} features")
+        return enriched
 
-        start_dt = self.config.resolved_datetime(self.config.start)
-        end_dt = self.config.resolved_datetime(self.config.end)
-        df = df[(df["timestamp"] >= start_dt) & (df["timestamp"] <= end_dt)]
-
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        df = df.dropna(subset=keep_cols)
-        df = df[keep_cols]
-
-        if self.config.max_bars_per_symbol and len(df) > self.config.max_bars_per_symbol:
-            df = df.tail(self.config.max_bars_per_symbol)
-
-        if self.config.sanity_mode:
-            df = df.tail(self.config.lookback_sanity)
-
-        return df.reset_index(drop=True)
-
+    # ------------------------------------------------------------------
+    # Windowing
+    # ------------------------------------------------------------------
     def _build_manifest(self, market_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         specs: List[WindowSpec] = []
 
@@ -316,13 +745,15 @@ class FullHistoryDataManager:
         val_start, val_end = self.config.resolved_range(self.config.val_range)
         test_start, test_end = self.config.resolved_range(self.config.test_range)
 
+        self._start_phase("WINDOWING", total=len(market_data), unit="symbol")
         for symbol, df in market_data.items():
             if len(df) < self.config.min_bars_for_windowing:
+                self._advance_phase("WINDOWING")
                 continue
 
             timestamps = df["timestamp"].tolist()
             total = len(df)
-            data_path = str(self._full_symbol_path(symbol))
+            data_path = self._relative_data_path(symbol)
 
             for start_idx in range(0, total - self.config.window_size + 1, self.config.window_stride):
                 end_idx = start_idx + self.config.window_size
@@ -339,6 +770,15 @@ class FullHistoryDataManager:
                 if not split:
                     continue
 
+                window_df = df.iloc[start_idx:end_idx]
+                window_return = window_df["close"].iloc[-1] / window_df["close"].iloc[0] - 1
+                if window_return > 0.02:
+                    regime = "bull"
+                elif window_return < -0.02:
+                    regime = "bear"
+                else:
+                    regime = "sideways"
+
                 specs.append(
                     WindowSpec(
                         symbol=symbol,
@@ -347,15 +787,385 @@ class FullHistoryDataManager:
                         end_idx=end_idx,
                         start_ts=window_start,
                         end_ts=window_end,
+                        regime=regime,
                         data_path=data_path,
                     )
                 )
+
+            self._advance_phase("WINDOWING")
+
+        self._close_phase("WINDOWING")
 
         if not specs:
             raise RuntimeError("No window specs generated - check data availability")
 
         manifest = pd.DataFrame([spec.__dict__ for spec in specs])
+        manifest = self._balance_manifest(manifest)
+        split_counts = manifest["split"].value_counts()
+        print(
+            "✅ WINDOWING DONE — train/val/test: "
+            f"{split_counts.get('TRAIN', 0)}/{split_counts.get('VAL', 0)}/{split_counts.get('TEST', 0)}"
+        )
         return manifest
+
+    def _balance_manifest(self, manifest: pd.DataFrame) -> pd.DataFrame:
+        balanced_frames: List[pd.DataFrame] = []
+        rng = np.random.default_rng(42)
+
+        for split, split_df in manifest.groupby("split"):
+            split_df = split_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+            counts = split_df["regime"].value_counts()
+            if counts.empty:
+                balanced_frames.append(split_df)
+                continue
+
+            target = counts.min()
+            if target == 0:
+                balanced_frames.append(split_df)
+                continue
+
+            sampled_frames = []
+            for regime, regime_df in split_df.groupby("regime"):
+                take = min(len(regime_df), target)
+                sampled = regime_df.sample(n=take, random_state=rng.integers(1, 1_000_000))
+                sampled_frames.append(sampled)
+
+            merged = pd.concat(sampled_frames, ignore_index=True)
+            merged = merged.sample(frac=1.0, random_state=42).reset_index(drop=True)
+            balanced_frames.append(merged)
+
+        balanced = pd.concat(balanced_frames, ignore_index=True)
+        balanced = balanced.sample(frac=1.0, random_state=42).reset_index(drop=True)
+        return balanced
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        rename_map = {col: col.lower() for col in df.columns}
+        df = df.rename(columns=rename_map)
+
+        if "t" in df.columns and "timestamp" not in df.columns:
+            df["timestamp"] = pd.to_datetime(df["t"], unit="ms")
+        if "time" in df.columns and "timestamp" not in df.columns:
+            df["timestamp"] = pd.to_datetime(df["time"])
+
+        df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
+        df = df.sort_values("timestamp").drop_duplicates("timestamp")
+
+        df = df[(df["timestamp"] >= self._start_dt) & (df["timestamp"] <= self._end_dt)]
+
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        keep_cols = ["timestamp", "open", "high", "low", "close", "volume"]
+        df = df.dropna(subset=keep_cols)
+        df = df[keep_cols]
+        df = df.reset_index(drop=True)
+        return df
+
+    def _clip_outliers(self, df: pd.DataFrame) -> pd.DataFrame:
+        numeric_cols = [col for col in df.columns if df[col].dtype.kind in "if"]
+        for col in numeric_cols:
+            series = df[col]
+            if series.empty:
+                continue
+            q_low = series.quantile(0.001)
+            q_high = series.quantile(0.999)
+            df[col] = series.clip(lower=q_low, upper=q_high)
+        return df
+
+    def _attach_news_features(self, symbol: str, bars: pd.DataFrame) -> pd.DataFrame:
+        news_df = self._load_news(symbol)
+        if news_df.empty:
+            for col in [
+                "news_count",
+                "news_sent_mean",
+                "news_sent_max",
+                "news_sent_min",
+                "news_headline_len_mean",
+            ]:
+                bars[col] = 0.0
+            return bars
+
+        window = pd.Timedelta(minutes=60)
+        articles = deque()
+        timestamps = news_df["timestamp"].tolist()
+        sentiments_raw = news_df["sentiment"].tolist()
+        lengths = news_df["headline_len"].tolist()
+
+        idx = 0
+        count_feature = []
+        mean_feature = []
+        max_feature = []
+        min_feature = []
+        len_feature = []
+
+        for ts in bars["timestamp"]:
+            while idx < len(timestamps) and timestamps[idx] <= ts:
+                articles.append((timestamps[idx], sentiments_raw[idx], lengths[idx]))
+                idx += 1
+            while articles and articles[0][0] < ts - window:
+                articles.popleft()
+
+            if articles:
+                values = [item[1] for item in articles]
+                lengths_window = [item[2] for item in articles]
+                count_feature.append(float(len(values)))
+                mean_feature.append(float(np.mean(values)))
+                max_feature.append(float(np.max(values)))
+                min_feature.append(float(np.min(values)))
+                len_feature.append(float(np.mean(lengths_window)))
+            else:
+                count_feature.append(0.0)
+                mean_feature.append(0.0)
+                max_feature.append(0.0)
+                min_feature.append(0.0)
+                len_feature.append(0.0)
+
+        bars["news_count"] = count_feature
+        bars["news_sent_mean"] = mean_feature
+        bars["news_sent_max"] = max_feature
+        bars["news_sent_min"] = min_feature
+        bars["news_headline_len_mean"] = len_feature
+        return bars
+
+    def _load_news(self, symbol: str) -> pd.DataFrame:
+        if symbol in self._news_cache:
+            return self._news_cache[symbol]
+        if yf is None:
+            df = pd.DataFrame(columns=["timestamp", "sentiment", "headline_len"])
+            self._news_cache[symbol] = df
+            return df
+        try:
+            ticker = yf.Ticker(symbol)
+            news_items = ticker.news or []
+        except Exception:
+            news_items = []
+
+        rows = []
+        for item in news_items:
+            ts = item.get("providerPublishTime") or item.get("published")
+            if ts is None:
+                continue
+            if isinstance(ts, (int, float)):
+                timestamp = datetime.utcfromtimestamp(ts)
+            else:
+                timestamp = pd.to_datetime(ts, utc=True).to_pydatetime()
+            timestamp = timestamp.replace(tzinfo=None)
+            if timestamp < self._start_dt or timestamp > self._end_dt:
+                continue
+            headline = item.get("title") or ""
+            sentiment = self._headline_sentiment(headline)
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "sentiment": sentiment,
+                    "headline_len": float(len(headline)),
+                }
+            )
+
+        if rows:
+            df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+        else:
+            df = pd.DataFrame(columns=["timestamp", "sentiment", "headline_len"])
+        self._news_cache[symbol] = df
+        return df
+
+    @staticmethod
+    def _headline_sentiment(headline: str) -> float:
+        if not headline:
+            return 0.0
+        positive = {
+            "gain",
+            "surge",
+            "beat",
+            "growth",
+            "bull",
+            "strong",
+            "upgrade",
+            "record",
+        }
+        negative = {
+            "loss",
+            "drop",
+            "miss",
+            "bear",
+            "weak",
+            "downgrade",
+            "selloff",
+            "fraud",
+        }
+        text = headline.lower()
+        score = 0
+        for word in positive:
+            if word in text:
+                score += 1
+        for word in negative:
+            if word in text:
+                score -= 1
+        return float(max(min(score / 3.0, 1.0), -1.0))
+
+    def _print_coverage_summary(self, market_data: Dict[str, pd.DataFrame]) -> None:
+        print("\nCoverage summary per symbol:")
+        for symbol, df in market_data.items():
+            stats = self._coverage_stats.get(symbol) or self._compute_coverage_stats(symbol, df)
+            source = self._symbol_sources.get(symbol, "unknown")
+            print(
+                f"  {symbol}: {stats['first_ts']} → {stats['last_ts']} — {int(stats['bars']):,} bars "
+                f"({stats['coverage_pct']:.2f}% coverage, unique_days={int(stats['unique_days'])}, "
+                f"expected_days={int(stats['expected_days'])}) [{source}]"
+            )
+
+    def _report_coverage_failure(self, symbol: str, stats: Dict[str, Any]) -> None:
+        print("\nCoverage validation failed:")
+        print(
+            f"  {symbol}: {stats['coverage_pct']:.2f}% coverage, "
+            f"unique_days={int(stats['unique_days'])}, expected_days={int(stats['expected_days'])}"
+        )
+
+    def _page_cache_path(self, symbol: str, page: int) -> Path:
+        directory = self._symbol_cache_dir(symbol)
+        directory.mkdir(parents=True, exist_ok=True)
+        new_name = (
+            f"{symbol}_{self.config.timeframe}_{self.config.start}_{self.config.end}_p{page:04d}.parquet"
+        )
+        new_path = directory / new_name
+        legacy_path = directory / f"p{page:04d}.parquet"
+        if legacy_path.exists() and not new_path.exists():
+            return legacy_path
+        return new_path
+
+    def _compute_coverage_stats(self, symbol: str, df: pd.DataFrame) -> Dict[str, Any]:
+        if df.empty:
+            return {
+                "first_ts": None,
+                "last_ts": None,
+                "unique_days": 0,
+                "bars": 0,
+                "coverage_pct": 0.0,
+                "expected_days": len(self._trading_days),
+                "is_crypto": self._is_crypto_symbol(symbol),
+            }
+
+        timestamps = pd.to_datetime(df["timestamp"])
+        unique_days = int(timestamps.dt.normalize().nunique())
+        bars = int(len(df))
+
+        is_crypto = self._is_crypto_symbol(symbol)
+        if is_crypto:
+            total_minutes = max(1, int((self._end_dt - self._start_dt).total_seconds() / 60) + 1)
+            coverage = min(1.0, bars / total_minutes)
+            expected_days = (self._end_dt.date() - self._start_dt.date()).days + 1
+        else:
+            expected_days = len(self._trading_days)
+            coverage = min(1.0, unique_days / expected_days) if expected_days else 0.0
+
+        return {
+            "first_ts": timestamps.iloc[0],
+            "last_ts": timestamps.iloc[-1],
+            "unique_days": unique_days,
+            "bars": bars,
+            "coverage_pct": coverage * 100,
+            "expected_days": expected_days,
+            "is_crypto": is_crypto,
+        }
+
+    def _is_crypto_symbol(self, symbol: str) -> bool:
+        return symbol in self.crypto or symbol.upper().endswith("USDT")
+
+    def _symbol_cache_dir(self, symbol: str) -> Path:
+        return self.cache_dir / symbol / self.config.timeframe / f"{self.config.start}_{self.config.end}"
+
+    def _full_symbol_path(self, symbol: str) -> Path:
+        return self._symbol_cache_dir(symbol) / "full.parquet"
+
+    def _relative_data_path(self, symbol: str) -> str:
+        return str(self._full_symbol_path(symbol).relative_to(self.cache_dir))
+
+    def _persist_full_symbol(self, symbol: str, df: pd.DataFrame) -> None:
+        path = self._full_symbol_path(symbol)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(path, index=False)
+
+    def _persist_feature_columns(self, market_data: Dict[str, pd.DataFrame]) -> None:
+        if not market_data:
+            return
+        columns = [
+            col
+            for col in next(iter(market_data.values())).columns
+            if col not in {"timestamp", "open", "high", "low", "close", "volume"}
+        ]
+        self._feature_path.write_text("\n".join(columns))
+
+    def _persist_sources(self) -> None:
+        if not self._symbol_sources:
+            return
+        import json
+
+        self._source_path.write_text(json.dumps(self._symbol_sources, indent=2, sort_keys=True))
+
+    def _load_sources(self) -> Dict[str, str]:
+        if not self._source_path.exists():
+            return {}
+        import json
+
+        try:
+            return json.loads(self._source_path.read_text())
+        except json.JSONDecodeError:
+            return {}
+
+    def _load_feature_columns(self) -> List[str]:
+        if not self._feature_path.exists():
+            return []
+        return [line.strip() for line in self._feature_path.read_text().splitlines() if line.strip()]
+
+    def _can_short_circuit(self) -> bool:
+        return (
+            self.config.use_cache
+            and self._sentinel.exists()
+            and self._manifest_path.exists()
+        )
+
+    def _load_cached_symbols(self, manifest: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+        market_data: Dict[str, pd.DataFrame] = {}
+        for symbol, group in manifest.groupby("symbol"):
+            relative_path = group.iloc[0]["data_path"]
+            data_path = (self.cache_dir / relative_path).resolve()
+            if not data_path.exists():
+                df = self._rebuild_from_pages(symbol)
+                if df is not None:
+                    df = self._clean_dataframe(df)
+                    self._persist_full_symbol(symbol, df)
+            else:
+                df = pd.read_parquet(data_path)
+
+            if df is None or df.empty:
+                continue
+
+            market_data[symbol] = df
+
+        if not market_data:
+            raise RuntimeError("Cached manifest present but no symbol data found")
+
+        print("Loaded cached datasets from previous preparation")
+        return market_data
+
+    def _rebuild_from_pages(self, symbol: str) -> Optional[pd.DataFrame]:
+        frames: List[pd.DataFrame] = []
+        page = 0
+        while True:
+            cache_path = self._page_cache_path(symbol, page)
+            if not cache_path.exists():
+                break
+            frames.append(pd.read_parquet(cache_path))
+            page += 1
+
+        if not frames:
+            return None
+
+        return pd.concat(frames, ignore_index=True)
 
     @staticmethod
     def _determine_split(
@@ -375,52 +1185,6 @@ class FullHistoryDataManager:
         if within(test_range):
             return "TEST"
         return None
-
-    def _can_short_circuit(self) -> bool:
-        return self.config.use_cache and self._sentinel.exists() and self._manifest_path.exists()
-
-    def _load_cached_symbols(self, manifest: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-        market_data: Dict[str, pd.DataFrame] = {}
-        for symbol, group in manifest.groupby("symbol"):
-            data_path = Path(group.iloc[0]["data_path"])
-            if not data_path.is_absolute():
-                data_path = (self.cache_dir / data_path).resolve()
-
-            if data_path.exists():
-                df = pd.read_parquet(data_path)
-            else:
-                df = self._rebuild_from_pages(symbol)
-                if df is not None:
-                    df.to_parquet(data_path, index=False)
-
-            if df is None or df.empty:
-                continue
-
-            cleaned = self._clean_dataframe(df)
-            if cleaned.empty:
-                continue
-
-            market_data[symbol] = cleaned
-
-        if not market_data:
-            raise RuntimeError("Cached manifest present but no symbol data found")
-
-        return market_data
-
-    def _rebuild_from_pages(self, symbol: str) -> Optional[pd.DataFrame]:
-        frames: List[pd.DataFrame] = []
-        page = 0
-        while True:
-            cache_path = self._page_cache_path(symbol, page)
-            if not cache_path.exists():
-                break
-            frames.append(pd.read_parquet(cache_path))
-            page += 1
-
-        if not frames:
-            return None
-
-        return pd.concat(frames, ignore_index=True)
 
 
 __all__ = ["FullHistoryDataManager", "WindowSpec"]
