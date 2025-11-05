@@ -61,6 +61,15 @@ class FullHistoryConfig:
         default_factory=lambda: os.getenv("FORCE_FULL_PREP", "").lower() in {"1", "true", "yes"}
     )
 
+    def __post_init__(self) -> None:
+        start_env = os.getenv("START_DATE") or os.getenv("FULL_HISTORY_START_DATE")
+        end_env = os.getenv("END_DATE") or os.getenv("FULL_HISTORY_END_DATE")
+        if start_env:
+            self.start = start_env
+        if end_env:
+            self.end = end_env
+        self.resolve_dates()
+
     def resolve_dates(self) -> None:
         """Resolve placeholders in ranges and end date."""
         self.end = _resolve_today(self.end)

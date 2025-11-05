@@ -167,8 +167,8 @@ class FullHistoryDataManager:
         if getattr(trading_days, "tz", None) is not None:
             trading_days = trading_days.tz_convert("UTC").tz_localize(None)
 
-        if not self.config.sanity_mode and len(trading_days) < 1000:
-            raise RuntimeError("Range resolution bug — expected ≥1500 trading days")
+        if not self.config.sanity_mode and len(trading_days) < 1500:
+            raise RuntimeError("Range resolution bug — expected ≥1500 trading days for 2019–2025")
 
         return trading_days
 
@@ -178,7 +178,8 @@ class FullHistoryDataManager:
         day_strings = [day.strftime("%Y-%m-%d") for day in self._trading_days]
         first_days = day_strings[:5]
         last_days = day_strings[-5:]
-        print(f"START_DATE={start_str}, END_DATE={end_str}, calendar=XNYS")
+        print(f"⚙️ START_DATE={start_str}, END_DATE={end_str}")
+        print("calendar=XNYS")
         print(f"🗓️ Trading days: {len(self._trading_days)}")
         print(f"First 5: {first_days}")
         print(f"Last 5: {last_days}")
@@ -248,7 +249,7 @@ class FullHistoryDataManager:
                     f"unique_days={int(stats['unique_days'])}"
                 )
             raise RuntimeError(
-                "Coverage too low — check NYSE days iteration, S3 loop, or Yahoo merge"
+                "Coverage too low — check date resolution, S3 loop, Yahoo merge (no inner join)"
             )
 
         return market_data
@@ -269,50 +270,34 @@ class FullHistoryDataManager:
     ) -> Tuple[Optional[pd.DataFrame], Optional[str], int]:
         """Fetch a symbol from configured sources with fallback."""
 
-        is_crypto = symbol in self.crypto or symbol.upper().endswith("USDT")
+        if self._is_crypto_symbol(symbol):
+            df, files = self._fetch_binance_symbol(symbol, progress_hook=progress_hook)
+            if df is None or df.empty:
+                print(f"⚠️  No Binance data retrieved for {symbol}")
+                return None, None, files
 
-        preferred_sources: List[str] = []
-        for source in self.config.sources:
-            if is_crypto and source == "polygon":
-                continue
-            if not is_crypto and source == "binance":
-                continue
-            preferred_sources.append(source)
+            cleaned = self._clean_dataframe(df)
+            return cleaned, "binance", files
 
-        if is_crypto:
-            preferred_sources = ["binance", "yahoo", "polygon"] + preferred_sources
-        else:
-            preferred_sources = ["polygon", "yahoo", "binance"] + preferred_sources
+        polygon_df, files = self._fetch_polygon_symbol(symbol, progress_hook=progress_hook)
+        if polygon_df is None or polygon_df.empty:
+            print(
+                f"⚠️  Polygon data unavailable for {symbol} within {self.config.start} → {self.config.end}"
+            )
+            return None, None, files
 
-        ordered_sources = []
-        seen: set[str] = set()
-        for src in preferred_sources:
-            if src not in seen:
-                ordered_sources.append(src)
-                seen.add(src)
+        cleaned = self._clean_dataframe(polygon_df)
+        source = "polygon"
 
-        for source in ordered_sources:
-            if source == "polygon":
-                df, files = self._fetch_polygon_symbol(symbol, progress_hook=progress_hook)
-            elif source == "binance":
-                df, files = self._fetch_binance_symbol(symbol, progress_hook=progress_hook)
-            elif source == "yahoo":
-                df, files = self._fetch_yahoo_symbol(symbol)
-            else:
-                continue
+        yahoo_df, yahoo_files = self._fetch_yahoo_symbol(symbol)
+        if yahoo_df is not None and not yahoo_df.empty:
+            merged, used_yahoo = self._merge_polygon_with_yahoo(cleaned, yahoo_df, symbol)
+            if used_yahoo:
+                cleaned = merged
+                files += yahoo_files
+                source = "polygon+yahoo"
 
-            if df is not None and not df.empty:
-                cleaned = self._clean_dataframe(df)
-                if source == "polygon":
-                    yahoo_df, yahoo_files = self._fetch_yahoo_symbol(symbol)
-                    if yahoo_df is not None and not yahoo_df.empty:
-                        cleaned = self._merge_polygon_with_yahoo(cleaned, yahoo_df, symbol)
-                        files += yahoo_files
-                        source = "polygon+yahoo"
-                return cleaned, source, files
-
-        print(f"⚠️  No data retrieved for {symbol} from any source")
-        return None, None, 0
+        return cleaned, source, files
 
     def _fetch_polygon_symbol(
         self,
@@ -609,10 +594,10 @@ class FullHistoryDataManager:
         polygon_df: pd.DataFrame,
         yahoo_raw: pd.DataFrame,
         symbol: str,
-    ) -> pd.DataFrame:
+    ) -> Tuple[pd.DataFrame, bool]:
         yahoo_clean = self._clean_dataframe(yahoo_raw)
         if yahoo_clean.empty:
-            return polygon_df
+            return polygon_df, False
 
         polygon_df = polygon_df.sort_values("timestamp").reset_index(drop=True)
         yahoo_clean = yahoo_clean.sort_values("timestamp").reset_index(drop=True)
@@ -631,11 +616,12 @@ class FullHistoryDataManager:
         combined_rows = len(combined)
 
         if combined_rows < polygon_rows or combined_days < polygon_days:
-            raise RuntimeError(
-                f"Yahoo merge reduced coverage for {symbol} — check NYSE days iteration, S3 loop, or Yahoo merge"
+            print(
+                f"⚠️  Skipping Yahoo gap fill for {symbol}: merge reduced coverage"
             )
+            return polygon_df, False
 
-        return combined
+        return combined, True
 
     def _request_with_backoff(self, method: str, url: str, **kwargs) -> requests.Response:
         delay = self.config.initial_backoff
