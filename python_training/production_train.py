@@ -8,13 +8,16 @@ import os
 import sys
 import torch
 import numpy as np
-from datetime import datetime, timedelta
+import pandas as pd
+from datetime import datetime
 from dotenv import load_dotenv
 from supabase import create_client
-from production_data_fetcher import ProductionDataFetcher
 from trading_environment import create_trading_env
 from transformer_policy import TransformerPolicy
 from tqdm import tqdm
+
+from full_history_config import FullHistoryConfig
+from full_history_data import FullHistoryDataManager
 
 load_dotenv()
 
@@ -25,7 +28,28 @@ class ProductionTrainer:
     def __init__(self, config: dict):
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+
+        # Full history settings
+        self.settings = FullHistoryConfig()
+        self.stock_tickers = [
+            "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AMD",
+            "SPY", "QQQ", "IWM", "DIA",
+            "JPM", "BAC", "GS", "WFC",
+            "XOM", "CVX", "COP",
+            "UNH", "JNJ", "PFE",
+        ]
+        self.crypto_tickers = [
+            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+            "ADAUSDT", "DOGEUSDT", "MATICUSDT", "DOTUSDT", "AVAXUSDT",
+        ]
+        self.data_manager = FullHistoryDataManager(
+            self.settings,
+            stocks=self.stock_tickers,
+            crypto=self.crypto_tickers,
+        )
+        self.env_manifest = pd.DataFrame()
+        self.env_specs = {}
+
         # Supabase for logging
         self.supabase = create_client(
             os.getenv("SUPABASE_URL"),
@@ -42,58 +66,85 @@ class ProductionTrainer:
         print("\n" + "="*70)
         print("📊 PREPARING REAL MARKET DATA")
         print("="*70)
-        
-        # Calculate date range
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=self.config['data_days'])
-        
-        # Fetch data
-        fetcher = ProductionDataFetcher(
-            start_date=start_date.strftime("%Y-%m-%d"),
-            end_date=end_date.strftime("%Y-%m-%d")
-        )
-        
-        market_data, news_data = fetcher.fetch_all()
-        
-        # Filter symbols with enough data
-        min_bars = self.config.get('min_bars_per_symbol', 1000)
-        valid_symbols = [s for s, df in market_data.items() if len(df) >= min_bars]
-        
-        print(f"\n✅ Valid symbols for training: {len(valid_symbols)}/{len(market_data)}")
-        print(f"   Min bars required: {min_bars:,}")
-        
-        # Store for later use
-        self.market_data = {s: market_data[s] for s in valid_symbols}
-        self.news_data = news_data
-        self.symbols = valid_symbols
-        
+
+        try:
+            market_data, manifest = self.data_manager.prepare()
+        except Exception as exc:
+            print(f"❌ Data preparation failed: {exc}")
+            raise
+
+        self.market_data = market_data
+        self.env_manifest = manifest
+        self.news_data = pd.DataFrame()
+        self.symbols = sorted(self.market_data.keys())
+
+        split_counts = manifest['split'].value_counts().to_dict()
+        print(f"\n✅ Prepared {len(self.symbols)} symbols")
+        print(f"   Windows: {len(manifest)} (train={split_counts.get('TRAIN', 0)}, "
+              f"val={split_counts.get('VAL', 0)}, test={split_counts.get('TEST', 0)})")
+
+        print("✅ PREP DONE — starting training now")
+
         return self.market_data, self.news_data
     
     def create_environments(self):
         """Create trading environments for each symbol"""
         print("\n📦 Creating trading environments...")
-        
-        self.envs = {}
-        for symbol in tqdm(self.symbols, desc="Environments"):
-            env = create_trading_env(
-                symbol=symbol,
-                data_df=self.market_data[symbol],
-                news_df=self.news_data[self.news_data['symbol'] == symbol] if not self.news_data.empty else None,
-                config=self.config.get('env_config', {})
-            )
-            self.envs[symbol] = env
-        
-        print(f"✅ Created {len(self.envs)} environments")
+
+        if self.env_manifest.empty:
+            raise RuntimeError("Environment manifest is empty - run prepare_data first")
+
+        self.env_specs = {
+            split: df.reset_index(drop=True).to_dict("records")
+            for split, df in self.env_manifest.groupby("split")
+        }
+
+        total_specs = sum(len(specs) for specs in self.env_specs.values())
+        print(f"✅ Manifest ready with {total_specs} windows")
+
+        self.train_specs = self.env_specs.get("TRAIN", [])
+        self.val_specs = self.env_specs.get("VAL", [])
+        self.test_specs = self.env_specs.get("TEST", [])
+
+    def _create_env_from_spec(self, spec: dict):
+        symbol = spec['symbol']
+        window_df = self.market_data[symbol].iloc[spec['start_idx']:spec['end_idx']]
+        env_kwargs = self.config.get('env_config', {}).copy()
+
+        return create_trading_env(
+            symbols=[symbol],
+            phase=spec['split'].lower(),
+            external_data={symbol: window_df.to_dict('records')},
+            **env_kwargs
+        )
+
+    @staticmethod
+    def _reset_env(env, phase: str):
+        result = env.reset(phase=phase.lower())
+        if isinstance(result, tuple) and len(result) == 2:
+            return result
+        return result, {}
+
+    @staticmethod
+    def _step_env(env, action: int):
+        result = env.step(action)
+        if isinstance(result, tuple) and len(result) == 5:
+            return result
+        obs, reward, done, info = result
+        return obs, reward, done, False, info
     
     def initialize_policy(self):
         """Initialize transformer policy"""
         print("\n🧠 Initializing Transformer Policy...")
-        
-        # Get observation space from first environment
-        sample_env = self.envs[self.symbols[0]]
-        obs_dim = sample_env.observation_space.shape[0]
-        act_dim = sample_env.action_space.n
-        
+
+        if not self.train_specs:
+            raise RuntimeError("No training window specs available for policy initialization")
+
+        sample_env = self._create_env_from_spec(self.train_specs[0])
+        sample_obs, _ = self._reset_env(sample_env, phase="train")
+        obs_dim = sample_obs.shape[0]
+        act_dim = 3  # Environment uses three discrete actions: sell, hold, buy
+
         self.policy = TransformerPolicy(
             obs_dim=obs_dim,
             act_dim=act_dim,
@@ -116,19 +167,21 @@ class ProductionTrainer:
     def collect_trajectories(self, num_episodes: int):
         """Collect trajectories from real market data"""
         print(f"\n🎬 Collecting {num_episodes} episodes from real market data...")
-        
+
         trajectories = []
-        
+
         with tqdm(total=num_episodes, desc="Episodes") as pbar:
             for episode in range(num_episodes):
-                # Random symbol each episode for diversity
-                symbol = np.random.choice(self.symbols)
-                env = self.envs[symbol]
-                
-                obs, info = env.reset()
+                if not self.train_specs:
+                    raise RuntimeError("No training windows available for trajectory collection")
+
+                spec = self.train_specs[np.random.randint(0, len(self.train_specs))]
+                env = self._create_env_from_spec(spec)
+
+                obs, info = self._reset_env(env, phase=spec['split'])
                 done = False
                 episode_data = {
-                    'symbol': symbol,
+                    'symbol': spec['symbol'],
                     'observations': [],
                     'actions': [],
                     'rewards': [],
@@ -144,9 +197,9 @@ class ProductionTrainer:
                         action = np.random.choice(len(action_probs), p=action_probs)
                     
                     # Environment step
-                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    next_obs, reward, terminated, truncated, info = self._step_env(env, action)
                     done = terminated or truncated
-                    
+
                     # Store real outcome
                     episode_data['observations'].append(obs)
                     episode_data['actions'].append(action)
@@ -159,7 +212,7 @@ class ProductionTrainer:
                 trajectories.append(episode_data)
                 pbar.update(1)
                 pbar.set_postfix({
-                    'symbol': symbol,
+                    'symbol': spec['symbol'],
                     'steps': len(episode_data['rewards']),
                     'return': sum(episode_data['rewards'])
                 })
@@ -261,30 +314,34 @@ class ProductionTrainer:
     def evaluate(self, num_episodes: int = 10):
         """Evaluate policy on real market data"""
         print(f"\n📊 Evaluating on {num_episodes} episodes...")
-        
+
         eval_returns = []
         eval_lengths = []
-        
+
+        eval_pool = self.val_specs or self.test_specs or self.train_specs
+        if not eval_pool:
+            return {'mean_return': 0.0, 'std_return': 0.0, 'mean_length': 0.0}
+
         for _ in range(num_episodes):
-            symbol = np.random.choice(self.symbols)
-            env = self.envs[symbol]
-            
-            obs, _ = env.reset()
+            spec = eval_pool[np.random.randint(0, len(eval_pool))]
+            env = self._create_env_from_spec(spec)
+
+            obs, _ = self._reset_env(env, phase=spec['split'])
             done = False
             episode_return = 0
             episode_length = 0
-            
+
             while not done:
                 with torch.no_grad():
                     obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
                     action_probs = self.policy(obs_tensor).cpu().numpy()[0]
                     action = np.argmax(action_probs)  # Greedy for eval
-                
-                obs, reward, terminated, truncated, _ = env.step(action)
+
+                obs, reward, terminated, truncated, _ = self._step_env(env, action)
                 done = terminated or truncated
                 episode_return += reward
                 episode_length += 1
-            
+
             eval_returns.append(episode_return)
             eval_lengths.append(episode_length)
         
@@ -311,10 +368,15 @@ class ProductionTrainer:
         
         # 2. Create environments
         self.create_environments()
-        
+
         # 3. Initialize policy
         self.initialize_policy()
-        
+
+        if not self.train_specs:
+            raise RuntimeError("No training window specifications available")
+
+        print("🚀 TRAINING START")
+
         # 4. Training loop
         num_iterations = self.config.get('num_iterations', 100)
         episodes_per_iter = self.config.get('episodes_per_iteration', 50)

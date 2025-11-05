@@ -10,7 +10,8 @@ Features:
 """
 import os
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
+import pandas as pd
 from supabase import create_client, Client
 from datetime import datetime
 import json
@@ -36,6 +37,7 @@ class TradingEnvironment:
         confidence_threshold: float = 0.6,
         max_positions: int = 1,
         cooldown_minutes: int = 3,
+        external_data: Optional[Dict[str, Iterable[Dict]]] = None,
     ):
         self.symbols = symbols or []
         self.timeframe = timeframe
@@ -87,6 +89,9 @@ class TradingEnvironment:
         self.episode_trades = []
         self.episode_pnls = []
         
+        # External preloaded data (bypasses Supabase fetch)
+        self.external_data = external_data or {}
+
         # Load data
         self._load_historical_data()
         if self.enable_multi_market:
@@ -98,8 +103,26 @@ class TradingEnvironment:
     
     def _load_historical_data(self):
         """Load all available historical data"""
+        if self.external_data:
+            print(f"📊 Loading preloaded data for {len(self.external_data)} symbols...")
+            for symbol, rows in self.external_data.items():
+                if isinstance(rows, pd.DataFrame):
+                    bars = rows.to_dict("records")
+                else:
+                    bars = list(rows)
+
+                if not bars:
+                    continue
+
+                self.data[symbol] = bars
+                is_crypto = symbol.endswith(('USDT', 'BUSD', 'USD', 'BTC', 'ETH')) and len(symbol) > 4
+                self.symbol_types[symbol] = "crypto" if is_crypto else "stock"
+
+            print(f"✅ Loaded data for {len(self.data)} symbols from cache")
+            return
+
         print(f"📊 Loading historical data for {len(self.symbols)} symbols...")
-        
+
         for symbol in self.symbols:
             # Classify symbol type
             is_crypto = symbol.endswith(('USDT', 'BUSD', 'USD', 'BTC', 'ETH')) and len(symbol) > 4

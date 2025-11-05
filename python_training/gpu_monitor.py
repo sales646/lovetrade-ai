@@ -32,6 +32,8 @@ class GPUMonitor:
         self.is_monitoring = False
         self.monitor_thread = None
         self.gpu_stats_history: List[List[GPUStats]] = []
+        self._telemetry_available = True
+        self._telemetry_error_reported = False
         
     def start(self):
         """Start monitoring in background thread"""
@@ -68,6 +70,9 @@ class GPUMonitor:
     
     def get_gpu_stats(self) -> List[GPUStats]:
         """Get current GPU statistics using nvidia-smi"""
+        if not self._telemetry_available:
+            return []
+
         try:
             result = subprocess.run(
                 [
@@ -103,11 +108,11 @@ class GPUMonitor:
             
             return stats
         
-        except subprocess.CalledProcessError as e:
-            print(f"⚠️ nvidia-smi error: {e}")
-            return []
         except Exception as e:
-            print(f"⚠️ Error parsing GPU stats: {e}")
+            if not self._telemetry_error_reported:
+                print(f"⚠️ GPU telemetry disabled: {e}")
+                self._telemetry_error_reported = True
+            self._telemetry_available = False
             return []
     
     def get_avg_stats(self, window: int = 10) -> List[GPUStats]:
