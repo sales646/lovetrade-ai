@@ -44,6 +44,31 @@ class CachedDataTrainer:
         print(f"🎯 Device: {self.device}")
         print(f"📁 Cache directory: {self.cache_dir}")
         
+    def _normalize_timestamp_column(self, df: pd.DataFrame, column: str) -> pd.Series:
+        """Return a timezone-naive datetime series from the provided column."""
+        series = df[column]
+
+        if pd.api.types.is_datetime64_any_dtype(series):
+            return series
+
+        numeric_series = pd.to_numeric(series, errors='coerce')
+        if numeric_series.notna().any():
+            magnitude = numeric_series.abs().max()
+
+            if pd.isna(magnitude):
+                return pd.to_datetime(series, errors='coerce')
+
+            if magnitude >= 10 ** 18:
+                unit = 'ns'
+            elif magnitude >= 10 ** 15:
+                unit = 'us'
+            else:
+                unit = 'ms'
+
+            return pd.to_datetime(numeric_series, unit=unit, errors='coerce')
+
+        return pd.to_datetime(series, errors='coerce')
+
     def load_cached_data(self) -> Dict[str, pd.DataFrame]:
         """Load all cached raw files (S3 and Binance)."""
         print("\n📊 Loading cached market data...")
@@ -65,8 +90,6 @@ class CachedDataTrainer:
                             symbol = csv_gz_file.stem.split('_')[0]
 
                             # Standardize column names
-                            if 'timestamp' not in df.columns and 't' in df.columns:
-                                df['timestamp'] = pd.to_datetime(df['t'], unit='ms')
                             if 'open' not in df.columns and 'o' in df.columns:
                                 df['open'] = df['o']
                             if 'high' not in df.columns and 'h' in df.columns:
