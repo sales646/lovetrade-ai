@@ -24,6 +24,7 @@ load_dotenv("/.env")
 from trading_environment import TradingEnvironment
 from transformer_policy import TransformerPolicy
 from supabase_logger import SupabaseLogger
+from bc_pretrain import pretrain_bc
 
 class CachedDataTrainer:
     """Train RL policy from cached market data."""
@@ -454,9 +455,63 @@ class CachedDataTrainer:
         
         run_id = run_response.data[0]['id']
         print(f"\n🚀 Training run ID: {run_id}")
-        
+
+        # Ensure Supabase logger is aligned with this run
+        if hasattr(self.logger, 'run_id'):
+            self.logger.run_id = run_id
+
         best_sharpe = -float('inf')
-        
+
+        # ---------------------------------------------------------------
+        # Behavioral Cloning pretraining (warm-start policy)
+        # ---------------------------------------------------------------
+        bc_checkpoint_path = Path("./checkpoints/bc/bc_best.pt")
+        bc_symbols = list(data.keys())
+
+        bc_env = TradingEnvironment(
+            symbols=bc_symbols,
+            external_data={symbol: df for symbol, df in data.items()},
+            enable_multi_market=True,
+            walk_forward=False,
+            augment_data=False,
+        )
+
+        bc_metrics: Optional[Dict] = None
+
+        if not bc_checkpoint_path.exists():
+            bc_metrics = pretrain_bc(
+                policy,
+                bc_symbols,
+                bc_env,
+                device=str(self.device),
+            )
+
+        try:
+            bc_checkpoint = torch.load(bc_checkpoint_path, map_location=self.device)
+            policy.load_state_dict(bc_checkpoint['model_state_dict'])
+
+            if bc_metrics is None:
+                bc_metrics = {
+                    'final_loss': bc_checkpoint.get('loss'),
+                    'final_accuracy': bc_checkpoint.get('accuracy'),
+                    'best_loss': bc_checkpoint.get('loss'),
+                }
+        except FileNotFoundError:
+            print("⚠️ BC checkpoint missing even after optional pretraining.")
+        except Exception as exc:
+            print(f"⚠️ Error loading BC checkpoint: {exc}")
+
+        if bc_metrics is not None and hasattr(self.logger, 'log_metrics'):
+            self.logger.log_metrics(
+                'bc',
+                0,
+                {
+                    'loss': bc_metrics.get('final_loss'),
+                    'accuracy': bc_metrics.get('final_accuracy'),
+                    'best_loss': bc_metrics.get('best_loss'),
+                },
+            )
+
         # Training loop
         print("\n" + "="*70)
         print("🎯 STARTING TRAINING")
