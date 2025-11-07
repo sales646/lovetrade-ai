@@ -230,16 +230,13 @@ class CachedDataTrainer:
                 with torch.no_grad():
                     action_probs = policy(state_tensor)
                     action = torch.argmax(action_probs, dim=-1).item()
-                
-                # Convert to trading action (-1, 0, 1)
-                trading_action = action - 1
-                
-                # Step environment
-                next_state, reward, done, info = env.step(trading_action)
-                
+
+                # Step environment with discrete action (0: hold, 1: buy, 2: sell)
+                next_state, reward, done, info = env.step(action)
+
                 episode_data.append({
                     'state': state,
-                    'action': trading_action,
+                    'action': action,
                     'reward': reward,
                     'next_state': next_state,
                     'done': done
@@ -288,7 +285,7 @@ class CachedDataTrainer:
         for traj in trajectories:
             for t in traj['data']:
                 states.append(t['state'])
-                actions.append(t['action'] + 1)  # Convert back to 0,1,2
+                actions.append(t['action'])
                 advantages.append(t['advantage'])
         
         states = torch.FloatTensor(np.array(states)).to(self.device)
@@ -333,9 +330,8 @@ class CachedDataTrainer:
                 with torch.no_grad():
                     action_probs = policy(state_tensor)
                     action = torch.argmax(action_probs, dim=-1).item()
-                
-                trading_action = action - 1
-                next_state, reward, done, _ = env.step(trading_action)
+
+                next_state, reward, done, _ = env.step(action)
                 
                 total_reward += reward
                 state = next_state
