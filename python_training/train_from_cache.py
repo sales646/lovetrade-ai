@@ -9,6 +9,7 @@ import sys
 import glob
 import time
 import torch
+import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -225,21 +226,28 @@ class CachedDataTrainer:
             episode_data = []
             
             while not done:
-                # Get action from policy
-                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
                 with torch.no_grad():
-                    action_probs = policy(state_tensor)
-                    action = torch.argmax(action_probs, dim=-1).item()
-                
+                    action_logits = policy.get_action_logits(state_tensor)
+                    dist = torch.distributions.Categorical(logits=action_logits)
+                    action_idx = torch.argmax(action_logits, dim=-1).item()
+                    action_tensor = torch.tensor(action_idx, device=self.device, dtype=torch.long)
+                    log_prob = dist.log_prob(action_tensor).item()
+                    entropy = dist.entropy().item()
+                    value = policy.get_value(state_tensor).item()
+
                 # Convert to trading action (-1, 0, 1)
-                trading_action = action - 1
-                
+                trading_action = action_idx - 1
+
                 # Step environment
                 next_state, reward, done, info = env.step(trading_action)
-                
+
                 episode_data.append({
                     'state': state,
                     'action': trading_action,
+                    'log_prob': log_prob,
+                    'entropy': entropy,
+                    'value': value,
                     'reward': reward,
                     'next_state': next_state,
                     'done': done
@@ -256,63 +264,95 @@ class CachedDataTrainer:
         
         return trajectories
     
-    def compute_advantages(self, trajectories: List[Dict], gamma: float = 0.99) -> List[Dict]:
+    def compute_advantages(self, trajectories: List[Dict], gamma: float = 0.99,
+                           gae_lambda: float = 0.95) -> List[Dict]:
         """Compute GAE advantages."""
         for traj in trajectories:
             rewards = [t['reward'] for t in traj['data']]
-            
-            # Compute returns
+            dones = [t['done'] for t in traj['data']]
+            values = [t.get('value', 0.0) for t in traj['data']]
+            values.append(0.0)
+
             returns = []
-            R = 0
-            for r in reversed(rewards):
-                R = r + gamma * R
-                returns.insert(0, R)
-            
+            advantages = []
+            gae = 0.0
+            for step in reversed(range(len(rewards))):
+                mask = 1.0 - float(dones[step])
+                delta = rewards[step] + gamma * values[step + 1] * mask - values[step]
+                gae = delta + gamma * gae_lambda * mask * gae
+                advantages.insert(0, gae)
+                returns.insert(0, gae + values[step])
+
             # Add to trajectory
             for i, t in enumerate(traj['data']):
                 t['return'] = returns[i]
-                t['advantage'] = returns[i]  # Simplified, no baseline
-        
+                t['advantage'] = advantages[i]
+
+            traj['returns'] = returns
+            traj['advantages'] = advantages
+
         return trajectories
-    
+
     def update_policy(self, policy: TransformerPolicy, optimizer: torch.optim.Optimizer,
-                     trajectories: List[Dict], clip_epsilon: float = 0.2) -> Dict:
+                     trajectories: List[Dict], clip_epsilon: float = 0.2,
+                     entropy_coef: float = 0.01, value_coef: float = 0.5) -> Dict:
         """PPO policy update."""
         policy.train()
-        
+
         # Prepare batch
         states = []
         actions = []
         advantages = []
-        
+        returns = []
+        old_log_probs = []
+
         for traj in trajectories:
             for t in traj['data']:
                 states.append(t['state'])
                 actions.append(t['action'] + 1)  # Convert back to 0,1,2
                 advantages.append(t['advantage'])
-        
+                returns.append(t['return'])
+                old_log_probs.append(t['log_prob'])
+
         states = torch.FloatTensor(np.array(states)).to(self.device)
         actions = torch.LongTensor(actions).to(self.device)
         advantages = torch.FloatTensor(advantages).to(self.device)
-        
+        returns = torch.FloatTensor(returns).to(self.device)
+        old_log_probs = torch.FloatTensor(old_log_probs).to(self.device)
+
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
+
         # Forward pass
-        action_probs = policy(states)
-        log_probs = torch.log(action_probs.gather(1, actions.unsqueeze(1)) + 1e-8).squeeze()
-        
-        # PPO loss
-        loss = -(log_probs * advantages).mean()
-        
+        action_logits = policy.get_action_logits(states)
+        dist = torch.distributions.Categorical(logits=action_logits)
+        log_probs = dist.log_prob(actions)
+        entropy = dist.entropy().mean()
+        values = policy.get_value(states)
+
+        ratios = torch.exp(log_probs - old_log_probs)
+        clipped_ratios = torch.clamp(ratios, 1 - clip_epsilon, 1 + clip_epsilon)
+        surrogate = torch.min(ratios * advantages, clipped_ratios * advantages)
+        policy_loss = -surrogate.mean()
+        value_loss = F.mse_loss(values, returns)
+        loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+
+        approx_kl = (old_log_probs - log_probs).mean()
+        clip_fraction = (torch.abs(ratios - 1.0) > clip_epsilon).float().mean()
+
         # Update
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
         optimizer.step()
-        
+
         return {
             'loss': loss.item(),
+            'policy_loss': policy_loss.item(),
+            'value_loss': value_loss.item(),
+            'entropy': entropy.item(),
+            'approx_kl': approx_kl.item(),
+            'clip_fraction': clip_fraction.item(),
             'mean_advantage': advantages.mean().item()
         }
     
@@ -329,10 +369,10 @@ class CachedDataTrainer:
             total_reward = 0
             
             while not done:
-                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
                 with torch.no_grad():
-                    action_probs = policy(state_tensor)
-                    action = torch.argmax(action_probs, dim=-1).item()
+                    action_logits = policy.get_action_logits(state_tensor)
+                    action = torch.argmax(action_logits, dim=-1).item()
                 
                 trading_action = action - 1
                 next_state, reward, done, _ = env.step(trading_action)
