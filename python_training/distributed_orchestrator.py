@@ -17,12 +17,13 @@ from s3_data_loader import S3MarketDataLoader
 
 
 # Module-level function for multiprocessing pickle compatibility
-def _create_env_for_training(symbols, enable_multi_market=True, phase="train"):
+def _create_env_for_training(symbols, enable_multi_market=True, phase="train", external_data=None):
     """Environment factory for distributed training"""
     return create_trading_env(
         symbols=symbols,
         enable_multi_market=enable_multi_market,
-        phase=phase
+        phase=phase,
+        external_data=external_data
     )
 
 
@@ -31,6 +32,8 @@ class DistributedRLOrchestrator:
     
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or self._default_config()
+        self.use_cache = self.config.get('use_cache', Path(".cache_market").exists())
+        self.config['use_cache'] = self.use_cache
         self.distributed_trainer = None
         self.pbt_scheduler = None
         self.gpu_monitor = None
@@ -38,6 +41,7 @@ class DistributedRLOrchestrator:
         self.run_id = f"pnu_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.checkpoint_dir = Path(f"checkpoints/{self.run_id}")
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.external_data = None
     
     def _default_config(self) -> Dict:
         """A100-optimized configuration"""
@@ -59,34 +63,44 @@ class DistributedRLOrchestrator:
         print("\n🚀 PNU Training System Setup")
         print("="*70)
         
-        # Use ProductionDataFetcher for real market data
-        print("📥 Fetching REAL market data (Polygon S3 + Binance + Yahoo)...")
-        from production_data_fetcher import ProductionDataFetcher
-        from datetime import datetime, timedelta
-        
-        # Yahoo Finance 1-minute data is limited to 7 days
-        # For longer ranges, Polygon S3 and Binance provide historical data
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=7)  # Last 7 days for Yahoo 1-min data
-        
-        fetcher = ProductionDataFetcher(
-            start_date=start_date.strftime("%Y-%m-%d"),
-            end_date=end_date.strftime("%Y-%m-%d")
-        )
-        
-        market_data, news_data = fetcher.fetch_all()
-        
-        # Filter symbols with enough bars (min 1000)
-        min_bars = 1000
-        valid_symbols = [s for s, df in market_data.items() if len(df) >= min_bars]
-        
-        # Store data in Supabase for training
-        print(f"💾 Storing {len(valid_symbols)} symbols to Supabase...")
-        self._store_data_to_supabase(market_data, news_data, valid_symbols)
-        
-        self.config['symbols'] = valid_symbols
-        print(f"✅ Ready with {len(valid_symbols)} symbols")
-        print(f"   Data range: {start_date.date()} to {end_date.date()}")
+        if self.use_cache:
+            print("📦 Loading market data from local cache...")
+            from train_from_cache import CachedDataTrainer
+
+            cache_dir = Path(self.config.get('cache_dir', ".cache_market"))
+            cached_data = CachedDataTrainer(cache_dir).load_cached_data() or {}
+            self.external_data = cached_data
+            self.config['symbols'] = list(cached_data.keys())
+            print(f"✅ Loaded {len(self.config['symbols'])} symbols from cache")
+        else:
+            # Use ProductionDataFetcher for real market data
+            print("📥 Fetching REAL market data (Polygon S3 + Binance + Yahoo)...")
+            from production_data_fetcher import ProductionDataFetcher
+            from datetime import datetime, timedelta
+
+            # Yahoo Finance 1-minute data is limited to 7 days
+            # For longer ranges, Polygon S3 and Binance provide historical data
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=7)  # Last 7 days for Yahoo 1-min data
+
+            fetcher = ProductionDataFetcher(
+                start_date=start_date.strftime("%Y-%m-%d"),
+                end_date=end_date.strftime("%Y-%m-%d")
+            )
+
+            market_data, news_data = fetcher.fetch_all()
+
+            # Filter symbols with enough bars (min 1000)
+            min_bars = 1000
+            valid_symbols = [s for s, df in market_data.items() if len(df) >= min_bars]
+
+            # Store data in Supabase for training
+            print(f"💾 Storing {len(valid_symbols)} symbols to Supabase...")
+            self._store_data_to_supabase(market_data, news_data, valid_symbols)
+
+            self.config['symbols'] = valid_symbols
+            print(f"✅ Ready with {len(valid_symbols)} symbols")
+            print(f"   Data range: {start_date.date()} to {end_date.date()}")
         
         # GPU setup
         gpu_info = check_gpu_availability()
@@ -167,7 +181,12 @@ class DistributedRLOrchestrator:
         if self.config.get('bc_pretrain', True):
             print("📚 PHASE 1: BC Pretraining")
             from bc_pretrain import pretrain_bc
-            env = create_trading_env(symbols=self.config['symbols'], enable_multi_market=True, augment=True)
+            env = create_trading_env(
+                symbols=self.config['symbols'],
+                enable_multi_market=True,
+                augment=True,
+                external_data=self.external_data
+            )
             
             from transformer_policy import TransformerPolicy
             policy = TransformerPolicy(
@@ -192,7 +211,11 @@ class DistributedRLOrchestrator:
                 
                 # Use module-level function for pickling
                 from functools import partial
-                make_env = partial(_create_env_for_training, symbols=symbols)
+                make_env = partial(
+                    _create_env_for_training,
+                    symbols=symbols,
+                    external_data=self.external_data
+                )
                 
                 metrics = self.distributed_trainer.launch(
                     config=self.config, model_class=TransformerPolicy, env_fn=make_env
