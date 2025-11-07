@@ -295,7 +295,7 @@ class CachedDataTrainer:
                 step['return'] = returns
 
         return trajectories
-    
+
     def update_policy(self, policy: TransformerPolicy, optimizer: torch.optim.Optimizer,
                      trajectories: List[Dict], clip_epsilon: float = 0.2,
                      value_coef: float = 0.5, entropy_coef: float = 0.01) -> Dict:
