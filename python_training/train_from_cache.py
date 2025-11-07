@@ -247,11 +247,27 @@ class CachedDataTrainer:
                 
                 state = next_state
             
+            # Determine final equity including any open position value
+            final_equity = env.balance
+            if env.position > 0:
+                latest_price = None
+                if env.current_symbol and env.current_symbol in env.data:
+                    symbol_data = env.data[env.current_symbol]
+                    if symbol_data:
+                        price_index = min(max(env.current_step - 1, 0), len(symbol_data) - 1)
+                        latest_price = float(symbol_data[price_index].get('close', 0.0))
+
+                if latest_price is None or latest_price == 0.0:
+                    latest_price = env.position_price
+
+                final_equity += env.position * latest_price
+
             trajectories.append({
-                'symbol': env.symbol,
+                'symbol': env.current_symbol,
                 'data': episode_data,
                 'total_reward': sum(t['reward'] for t in episode_data),
-                'final_equity': env.equity
+                'final_equity': final_equity,
+                'episode_stats': env.get_episode_stats()
             })
         
         return trajectories
