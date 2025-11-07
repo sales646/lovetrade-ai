@@ -1043,6 +1043,68 @@ export type Database = {
         }
         Relationships: []
       }
+      trained_models: {
+        Row: {
+          created_at: string | null
+          file_size_bytes: number | null
+          final_sharpe_ratio: number | null
+          final_win_rate: number | null
+          hyperparameters: Json | null
+          id: string
+          is_best: boolean | null
+          model_name: string
+          model_type: string
+          performance_metrics: Json | null
+          run_id: string | null
+          storage_path: string
+          trained_on_symbols: string[] | null
+          training_duration_seconds: number | null
+          updated_at: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          file_size_bytes?: number | null
+          final_sharpe_ratio?: number | null
+          final_win_rate?: number | null
+          hyperparameters?: Json | null
+          id?: string
+          is_best?: boolean | null
+          model_name: string
+          model_type: string
+          performance_metrics?: Json | null
+          run_id?: string | null
+          storage_path: string
+          trained_on_symbols?: string[] | null
+          training_duration_seconds?: number | null
+          updated_at?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          file_size_bytes?: number | null
+          final_sharpe_ratio?: number | null
+          final_win_rate?: number | null
+          hyperparameters?: Json | null
+          id?: string
+          is_best?: boolean | null
+          model_name?: string
+          model_type?: string
+          performance_metrics?: Json | null
+          run_id?: string | null
+          storage_path?: string
+          trained_on_symbols?: string[] | null
+          training_duration_seconds?: number | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "trained_models_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "training_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       training_metrics: {
         Row: {
           action_buy_pct: number | null
