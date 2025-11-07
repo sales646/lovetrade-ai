@@ -24,11 +24,27 @@ class DistributedTrainer:
         use_bf16: bool = True,
         envs_per_gpu: int = 16  # Balanced for CPU/GPU pipeline
     ):
-        self.world_size = world_size
+        self.requested_world_size = world_size
         self.backend = backend
         self.use_bf16 = use_bf16
         self.envs_per_gpu = envs_per_gpu
-        self.total_envs = world_size * envs_per_gpu
+        self.is_cuda_available = torch.cuda.is_available()
+
+        if self.is_cuda_available:
+            max_devices = torch.cuda.device_count()
+            if world_size > max_devices:
+                print(
+                    f"⚠️  Requested world_size {world_size} exceeds available CUDA devices ({max_devices}). "
+                    "Clamping to available devices."
+                )
+            self.world_size = max(1, min(world_size, max_devices))
+        else:
+            if backend == "nccl":
+                self.backend = "gloo"
+            self.world_size = 1
+            self.use_bf16 = False
+
+        self.total_envs = self.world_size * self.envs_per_gpu
         
     def setup(self, rank: int, world_size: int):
         """Initialize distributed process group"""
@@ -36,12 +52,13 @@ class DistributedTrainer:
         import datetime
         timeout = datetime.timedelta(minutes=10)
         dist.init_process_group(
-            self.backend, 
-            rank=rank, 
+            self.backend,
+            rank=rank,
             world_size=world_size,
             timeout=timeout
         )
-        torch.cuda.set_device(rank)
+        if self.is_cuda_available:
+            torch.cuda.set_device(rank)
     
     @staticmethod
     def _find_free_port() -> int:
@@ -54,7 +71,8 @@ class DistributedTrainer:
         
     def cleanup(self):
         """Clean up distributed process group"""
-        dist.destroy_process_group()
+        if dist.is_initialized():
+            dist.destroy_process_group()
         
     def train_worker(
         self,
@@ -68,57 +86,77 @@ class DistributedTrainer:
         """Training worker for each GPU"""
         try:
             # Enable TF32 for H100 performance boost
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            
-            print(f"🚀 Starting worker on GPU {rank}/{world_size}")
-            print(f"[GPU {rank}] Setting up distributed process group...")
+            if self.is_cuda_available:
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+
+            device = torch.device("cuda", rank) if self.is_cuda_available else torch.device("cpu")
+            device_label = f"GPU {rank}" if self.is_cuda_available else "CPU"
+
+            print(f"🚀 Starting worker on {device_label} ({rank}/{world_size})")
+            print(f"[{device_label}] Setting up distributed process group...")
             self.setup(rank, world_size)
-            print(f"[GPU {rank}] Process group initialized!")
-            
+            print(f"[{device_label}] Process group initialized!")
+
             # Set GPU and enable optimizations
-            torch.cuda.set_device(rank)
-            torch.cuda.empty_cache()  # Clear any stale memory
-            
+            if self.is_cuda_available:
+                torch.cuda.set_device(rank)
+                torch.cuda.empty_cache()  # Clear any stale memory
+
             # Create model on this GPU
-            print(f"[GPU {rank}] Creating model...")
+            print(f"[{device_label}] Creating model...")
             try:
-                model = model_class(config).to(rank)
+                model = model_class(config).to(device)
             except TypeError:
                 # Fallback if model_class doesn't accept config
                 model = model_class(
                     state_dim=config.get('state_dim', 50),
                     action_dim=config.get('action_dim', 3)
-                ).to(rank)
-            print(f"[GPU {rank}] Model created and moved to GPU!")
-            
-            if self.use_bf16:
+                ).to(device)
+            print(f"[{device_label}] Model created and moved to {device}!")
+
+            if self.use_bf16 and device.type == "cuda":
                 model = model.to(torch.bfloat16)
-            
+
             # Wrap with DDP
-            ddp_model = DDP(model, device_ids=[rank])
-            
+            if self.is_cuda_available:
+                ddp_model = DDP(model, device_ids=[rank])
+            else:
+                ddp_model = DDP(model)
+
             # Create optimizer with fused=True for H100 optimization
-            optimizer = torch.optim.AdamW(
-                ddp_model.parameters(),
-                lr=config.get("learning_rate", 3e-4),
-                weight_decay=config.get("weight_decay", 1e-5),
-                fused=True  # H100 optimization
-            )
+            optimizer_kwargs = {
+                "lr": config.get("learning_rate", 3e-4),
+                "weight_decay": config.get("weight_decay", 1e-5)
+            }
+            if self.is_cuda_available:
+                optimizer_kwargs["fused"] = True  # H100 optimization
+
+            try:
+                optimizer = torch.optim.AdamW(
+                    ddp_model.parameters(),
+                    **optimizer_kwargs
+                )
+            except TypeError:
+                optimizer_kwargs.pop("fused", None)
+                optimizer = torch.optim.AdamW(
+                    ddp_model.parameters(),
+                    **optimizer_kwargs
+                )
             
             # Training loop for this worker
-            print(f"[GPU {rank}] Starting training loop for {config.get('epochs', 10)} epochs...")
+            print(f"[{device_label}] Starting training loop for {config.get('epochs', 10)} epochs...")
             for epoch in range(config.get("epochs", 10)):
-                print(f"[GPU {rank}] Epoch {epoch+1}: Collecting rollouts...")
+                print(f"[{device_label}] Epoch {epoch+1}: Collecting rollouts...")
                 # Generate rollouts on this GPU
                 rollouts = self._collect_rollouts(
-                    rank, 
-                    ddp_model, 
-                    env_fn, 
+                    rank,
+                    ddp_model,
+                    env_fn,
                     self.envs_per_gpu,
                     config
                 )
-                print(f"[GPU {rank}] Epoch {epoch+1}: Collected {len(rollouts['rewards'])} steps")
+                print(f"[{device_label}] Epoch {epoch+1}: Collected {len(rollouts['rewards'])} steps")
                 
                 # Train on rollouts
                 metrics = self._train_epoch(
@@ -159,16 +197,18 @@ class DistributedTrainer:
     ) -> Dict:
         """Collect rollouts from parallel environments"""
         model.eval()
-        
+        device = next(model.parameters()).device
+        device_label = f"GPU {rank}" if device.type == "cuda" else "CPU"
+
         # Create vectorized environments for this GPU
-        print(f"[GPU {rank}] Creating {num_envs} environments...")
+        print(f"[{device_label}] Creating {num_envs} environments...")
         try:
             envs = [env_fn() for _ in range(num_envs)]
-            print(f"[GPU {rank}] Environments created, resetting...")
+            print(f"[{device_label}] Environments created, resetting...")
             states = [env.reset() for env in envs]
-            print(f"[GPU {rank}] Environments ready!")
+            print(f"[{device_label}] Environments ready!")
         except Exception as e:
-            print(f"⚠️  Warning on GPU {rank}: Could not create environments: {e}")
+            print(f"⚠️  Warning on {device_label}: Could not create environments: {e}")
             import traceback
             traceback.print_exc()
             # Return empty rollouts
@@ -195,8 +235,12 @@ class DistributedTrainer:
         with torch.no_grad():
             for step in range(steps_per_rollout):
                 # Batch states - keep everything on GPU for speed
-                state_batch = torch.FloatTensor(np.array(states)).to(rank, non_blocking=True)
-                if self.use_bf16:
+                state_batch = torch.as_tensor(
+                    np.array(states),
+                    dtype=torch.float32,
+                    device=device
+                )
+                if self.use_bf16 and device.type == "cuda":
                     state_batch = state_batch.to(torch.bfloat16)
                 
                 # Get actions from policy
@@ -247,13 +291,13 @@ class DistributedTrainer:
         device = next(model.parameters()).device
         
         # Convert lists to numpy arrays first, then to tensors for efficiency
-        states = torch.FloatTensor(np.array(rollouts['states'])).to(device)
-        actions = torch.FloatTensor(np.array(rollouts['actions'])).to(device)
-        rewards = torch.FloatTensor(rollouts['rewards']).to(device)
-        values = torch.FloatTensor(rollouts['values']).to(device)
-        old_log_probs = torch.FloatTensor(rollouts['log_probs']).to(device)
-        
-        if self.use_bf16:
+        states = torch.as_tensor(np.array(rollouts['states']), dtype=torch.float32, device=device)
+        actions = torch.as_tensor(np.array(rollouts['actions']), dtype=torch.float32, device=device)
+        rewards = torch.as_tensor(rollouts['rewards'], dtype=torch.float32, device=device)
+        values = torch.as_tensor(rollouts['values'], dtype=torch.float32, device=device)
+        old_log_probs = torch.as_tensor(rollouts['log_probs'], dtype=torch.float32, device=device)
+
+        if self.use_bf16 and device.type == "cuda":
             states = states.to(torch.bfloat16)
             values = values.to(torch.bfloat16)
         
@@ -347,10 +391,15 @@ class DistributedTrainer:
         env_fn
     ):
         """Launch distributed training"""
-        print(f"🚀 Launching distributed training on {self.world_size} GPUs")
+        self.total_envs = self.world_size * self.envs_per_gpu
+        device_label = "GPUs" if self.is_cuda_available else "CPU workers"
+        if not self.is_cuda_available:
+            print("⚠️  CUDA not available. Falling back to single-process CPU training with Gloo backend.")
+
+        print(f"🚀 Launching distributed training on {self.world_size} {device_label}")
         print(f"📊 Total environments: {self.total_envs}")
         print(f"⚡ BF16 precision: {self.use_bf16}")
-        
+
         # Set master address and port ONCE before spawning workers
         os.environ['MASTER_ADDR'] = 'localhost'
         if 'MASTER_PORT' not in os.environ:

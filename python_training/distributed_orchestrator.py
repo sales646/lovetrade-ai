@@ -107,7 +107,11 @@ class DistributedRLOrchestrator:
         if gpu_info['available']:
             self.config['world_size'] = min(self.config['world_size'], gpu_info['count'])
             print(f"✅ Using {self.config['world_size']} GPUs")
-        
+        else:
+            print("⚠️ No GPUs detected. Switching to CPU training mode.")
+            self.config['world_size'] = 1
+            self.config['use_bf16'] = False
+
         # Initialize components
         self.gpu_monitor = GPUMonitor(refresh_interval=2.0)
         self.gpu_monitor.start()
