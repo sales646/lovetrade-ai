@@ -163,29 +163,46 @@ class CachedDataTrainer:
             val_df = df[train_end:val_end]
             test_df = df[val_end:]
 
-            def _make_env(split_df: pd.DataFrame):
+            def _prepare_records(split_df: pd.DataFrame):
                 if len(split_df) <= 100:
                     return None
-                records = split_df.to_dict('records')
-                return TradingEnvironment(
-                    symbols=[symbol],
-                    external_data={symbol: records},
-                    walk_forward=False,
-                    enable_multi_market=False,
-                    initial_balance=100000
+                return split_df.to_dict('records')
+
+            train_records = _prepare_records(train_df)
+            if train_records is not None:
+                train_envs.append(
+                    TradingEnvironment(
+                        symbols=[symbol],
+                        external_data={symbol: train_records},
+                        walk_forward=False,
+                        enable_multi_market=False,
+                        initial_balance=100000
+                    )
                 )
 
-            env = _make_env(train_df)
-            if env is not None:
-                train_envs.append(env)
+            val_records = _prepare_records(val_df)
+            if val_records is not None:
+                val_envs.append(
+                    TradingEnvironment(
+                        symbols=[symbol],
+                        external_data={symbol: val_records},
+                        walk_forward=False,
+                        enable_multi_market=False,
+                        initial_balance=100000
+                    )
+                )
 
-            env = _make_env(val_df)
-            if env is not None:
-                val_envs.append(env)
-
-            env = _make_env(test_df)
-            if env is not None:
-                test_envs.append(env)
+            test_records = _prepare_records(test_df)
+            if test_records is not None:
+                test_envs.append(
+                    TradingEnvironment(
+                        symbols=[symbol],
+                        external_data={symbol: test_records},
+                        walk_forward=False,
+                        enable_multi_market=False,
+                        initial_balance=100000
+                    )
+                )
         
         print(f"  📚 Train: {len(train_envs)} environments")
         print(f"  📊 Val: {len(val_envs)} environments")
