@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+import torch
+import torch.nn.functional as F
 from datetime import datetime
 from dotenv import load_dotenv
 from supabase import create_client
@@ -288,18 +290,25 @@ class ProductionTrainer:
                     'symbol': spec['symbol'],
                     'observations': [],
                     'actions': [],
+                    'log_probs': [],
+                    'entropies': [],
+                    'values': [],
                     'rewards': [],
                     'dones': [],
                     'infos': []
                 }
                 
                 while not done:
-                    # Policy forward pass
                     with torch.no_grad():
-                        obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-                        action_probs = self.policy(obs_tensor).cpu().numpy()[0]
-                        action = np.random.choice(len(action_probs), p=action_probs)
-                    
+                        obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+                        action_logits = self.policy.get_action_logits(obs_tensor)
+                        dist = torch.distributions.Categorical(logits=action_logits)
+                        action_tensor = dist.sample()
+                        action = int(action_tensor.item())
+                        log_prob = dist.log_prob(action_tensor).item()
+                        entropy = dist.entropy().item()
+                        value = self.policy.get_value(obs_tensor).item()
+
                     # Environment step
                     next_obs, reward, terminated, truncated, info = self._step_env(env, action)
                     done = terminated or truncated
@@ -307,6 +316,9 @@ class ProductionTrainer:
                     # Store real outcome
                     episode_data['observations'].append(obs)
                     episode_data['actions'].append(action)
+                    episode_data['log_probs'].append(log_prob)
+                    episode_data['entropies'].append(entropy)
+                    episode_data['values'].append(value)
                     episode_data['rewards'].append(reward)
                     episode_data['dones'].append(done)
                     episode_data['infos'].append(info)
@@ -329,21 +341,22 @@ class ProductionTrainer:
         gae_lambda = self.config.get('gae_lambda', 0.95)
         
         for traj in trajectories:
-            rewards = np.array(traj['rewards'])
-            dones = np.array(traj['dones'])
-            
-            # Simple advantage = discounted returns
-            advantages = []
-            returns = []
-            running_return = 0
-            
-            for r, done in zip(reversed(rewards), reversed(dones)):
-                running_return = r + gamma * running_return * (1 - done)
-                returns.insert(0, running_return)
-            
-            returns = np.array(returns)
-            advantages = returns - returns.mean()
-            
+            rewards = np.array(traj['rewards'], dtype=np.float32)
+            dones = np.array(traj['dones'], dtype=np.float32)
+            values = np.array(traj.get('values', [0.0] * len(rewards)), dtype=np.float32)
+
+            values = np.append(values, 0.0)
+            advantages = np.zeros_like(rewards, dtype=np.float32)
+            returns = np.zeros_like(rewards, dtype=np.float32)
+            gae = 0.0
+
+            for step in reversed(range(len(rewards))):
+                mask = 1.0 - dones[step]
+                delta = rewards[step] + gamma * values[step + 1] * mask - values[step]
+                gae = delta + gamma * gae_lambda * mask * gae
+                advantages[step] = gae
+                returns[step] = advantages[step] + values[step]
+
             traj['advantages'] = advantages
             traj['returns'] = returns
         
@@ -358,63 +371,103 @@ class ProductionTrainer:
         all_actions = []
         all_advantages = []
         all_returns = []
-        
+        all_log_probs = []
+
         for traj in trajectories:
             all_obs.extend(traj['observations'])
             all_actions.extend(traj['actions'])
             all_advantages.extend(traj['advantages'])
             all_returns.extend(traj['returns'])
-        
+            all_log_probs.extend(traj.get('log_probs', [0.0] * len(traj['actions'])))
+
         # Convert to tensors
         obs_tensor = torch.FloatTensor(np.array(all_obs)).to(self.device)
         actions_tensor = torch.LongTensor(np.array(all_actions)).to(self.device)
         advantages_tensor = torch.FloatTensor(np.array(all_advantages)).to(self.device)
-        
+        returns_tensor = torch.FloatTensor(np.array(all_returns)).to(self.device)
+        old_log_probs_tensor = torch.FloatTensor(np.array(all_log_probs)).to(self.device)
+
         # Normalize advantages
         advantages_tensor = (advantages_tensor - advantages_tensor.mean()) / (advantages_tensor.std() + 1e-8)
-        
+
         # PPO update
         num_updates = self.config.get('num_policy_updates', 10)
         batch_size = self.config.get('batch_size', 256)
-        
+        num_samples = len(all_obs)
+
+        policy_losses = []
+        value_losses = []
+        entropies = []
+        total_losses = []
+        approx_kls = []
+        clip_fracs = []
+
         for update in range(num_updates):
+            if num_samples == 0:
+                break
             # Mini-batch sampling
-            indices = np.random.permutation(len(all_obs))[:batch_size]
-            
+            indices = np.random.permutation(num_samples)[: min(batch_size, num_samples)]
+
             obs_batch = obs_tensor[indices]
             actions_batch = actions_tensor[indices]
             advantages_batch = advantages_tensor[indices]
-            
+            returns_batch = returns_tensor[indices]
+            old_log_probs_batch = old_log_probs_tensor[indices]
+
             # Forward pass
-            action_probs = self.policy(obs_batch)
-            log_probs = torch.log(action_probs.gather(1, actions_batch.unsqueeze(1)) + 1e-8)
-            
-            # Policy loss
-            policy_loss = -(log_probs.squeeze() * advantages_batch).mean()
-            
-            # Entropy bonus for exploration
-            entropy = -(action_probs * torch.log(action_probs + 1e-8)).sum(dim=1).mean()
-            entropy_coef = self.config.get('entropy_coef', 0.01)
-            
-            loss = policy_loss - entropy_coef * entropy
-            
+            action_logits = self.policy.get_action_logits(obs_batch)
+            dist = torch.distributions.Categorical(logits=action_logits)
+            log_probs = dist.log_prob(actions_batch)
+            entropy = dist.entropy().mean()
+            values = self.policy.get_value(obs_batch)
+
+            ratios = torch.exp(log_probs - old_log_probs_batch)
+            clipped_ratios = torch.clamp(ratios, 1 - self.clip_range, 1 + self.clip_range)
+            surrogate = torch.min(ratios * advantages_batch, clipped_ratios * advantages_batch)
+            policy_loss = -surrogate.mean()
+            value_loss = F.mse_loss(values, returns_batch)
+            loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+
+            approx_kl = (old_log_probs_batch - log_probs).mean()
+            clip_frac = (torch.abs(ratios - 1.0) > self.clip_range).float().mean()
+
             # Update
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
             self.optimizer.step()
-        
-        print(f"✅ Policy updated ({num_updates} iterations)")
-        print(f"   Final loss: {loss.item():.4f}")
-        print(f"   Policy loss: {policy_loss.item():.4f}")
-        print(f"   Entropy: {entropy.item():.4f}")
-        
+
+            policy_losses.append(policy_loss.item())
+            value_losses.append(value_loss.item())
+            entropies.append(entropy.item())
+            total_losses.append(loss.item())
+            approx_kls.append(approx_kl.item())
+            clip_fracs.append(clip_frac.item())
+
+        if policy_losses:
+            avg_policy_loss = float(np.mean(policy_losses))
+            avg_value_loss = float(np.mean(value_losses))
+            avg_entropy = float(np.mean(entropies))
+            avg_loss = float(np.mean(total_losses))
+            avg_kl = float(np.mean(approx_kls))
+            avg_clip = float(np.mean(clip_fracs))
+        else:
+            avg_policy_loss = avg_value_loss = avg_entropy = avg_loss = avg_kl = avg_clip = 0.0
+
+        print(f"✅ Policy updated ({min(num_updates, len(policy_losses))} iterations)")
+        print(f"   Final loss: {avg_loss:.4f}")
+        print(f"   Policy loss: {avg_policy_loss:.4f}")
+        print(f"   Value loss: {avg_value_loss:.4f}")
+        print(f"   Entropy: {avg_entropy:.4f}")
+        print(f"   Approx KL: {avg_kl:.4f} | Clip frac: {avg_clip:.3f}")
+
         return {
-            "sharpe": float(sharpe),
-            "sortino": float(sortino),
-            "max_drawdown": max_drawdown,
-            "hit_rate": hit_rate,
-            "profit_factor": profit_factor,
+            "loss": avg_loss,
+            "policy_loss": avg_policy_loss,
+            "value_loss": avg_value_loss,
+            "entropy": avg_entropy,
+            "approx_kl": avg_kl,
+            "clip_fraction": avg_clip,
         }
     
     def evaluate(self, num_episodes: int = 10):
@@ -439,9 +492,9 @@ class ProductionTrainer:
 
             while not done:
                 with torch.no_grad():
-                    obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-                    action_probs = self.policy(obs_tensor).cpu().numpy()[0]
-                    action = np.argmax(action_probs)  # Greedy for eval
+                    obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    action_logits = self.policy.get_action_logits(obs_tensor)
+                    action = int(torch.argmax(action_logits, dim=-1).item())  # Greedy for eval
 
                 obs, reward, terminated, truncated, _ = self._step_env(env, action)
                 done = terminated or truncated
