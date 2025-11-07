@@ -17,8 +17,8 @@ from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# Load environment
-load_dotenv()
+# Load environment from python_training/.env
+load_dotenv(Path(__file__).parent / ".env")
 
 # Import training modules
 from trading_environment import TradingEnvironment
