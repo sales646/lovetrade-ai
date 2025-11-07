@@ -53,8 +53,8 @@ policy = TransformerPolicy(
     d_model=512,  # Reasonable size
     nhead=8,
     num_layers=6,
-    device='cuda'
 )
+policy = policy.cuda()
 print(f"✅ Model on GPU: {next(policy.parameters()).device}")
 
 # Step 5: Train
@@ -73,8 +73,8 @@ for epoch in range(10):
         # Get action from policy
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0).cuda()
-            action_probs = policy(state_tensor)
-            action = torch.argmax(action_probs, dim=-1).item()
+            logits = policy.get_action_logits(state_tensor)
+            action = torch.argmax(logits, dim=-1).item()
         
         # Take step
         next_state, reward, done, _ = env.step(action)

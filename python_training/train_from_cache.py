@@ -256,8 +256,8 @@ class CachedDataTrainer:
         policy = TransformerPolicy(
             state_dim=state_dim,
             action_dim=3,  # buy, hold, sell
-            hidden_dim=256,
-            num_heads=8,
+            d_model=256,
+            nhead=8,
             num_layers=6,
             dropout=0.1
         ).to(self.device)

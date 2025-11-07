@@ -251,12 +251,16 @@ class ProductionTrainer:
         obs_dim = sample_obs.shape[0]
         act_dim = 3  # Environment uses three discrete actions: sell, hold, buy
 
+        d_model = self.config.get('d_model', self.config.get('hidden_dim', 256))
+        nhead = self.config.get('nhead', self.config.get('num_heads', 8))
+        num_layers = self.config.get('num_layers', 4)
+
         self.policy = TransformerPolicy(
-            obs_dim=obs_dim,
-            act_dim=act_dim,
-            hidden_dim=self.config.get('hidden_dim', 256),
-            num_layers=self.config.get('num_layers', 4),
-            num_heads=self.config.get('num_heads', 8)
+            state_dim=obs_dim,
+            action_dim=act_dim,
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers
         ).to(self.device)
         
         self.optimizer = torch.optim.Adam(
@@ -267,7 +271,7 @@ class ProductionTrainer:
         print(f"✅ Policy initialized")
         print(f"   Obs dim: {obs_dim}")
         print(f"   Action dim: {act_dim}")
-        print(f"   Hidden dim: {self.config.get('hidden_dim', 256)}")
+        print(f"   Model dim: {d_model}")
         print(f"   Parameters: {sum(p.numel() for p in self.policy.parameters()):,}")
     
     def collect_trajectories(self, num_episodes: int):
