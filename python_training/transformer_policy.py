@@ -156,20 +156,16 @@ class TransformerPolicy(nn.Module):
         self,
         state: torch.Tensor,
         action: torch.Tensor,
-        size: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         encoded = self._encode(state)
         core = self._shared_head(encoded)
         action_logits = self.action_head(core)
-        size_logits = self.size_head(core)
-        risk_params = self.risk_head(core)
         value = self.value_head(core).squeeze(-1)
 
         action_dist = torch.distributions.Categorical(logits=action_logits)
-        size_dist = torch.distributions.Categorical(logits=size_logits)
-        log_prob = action_dist.log_prob(action) + size_dist.log_prob(size)
-        entropy = action_dist.entropy() + size_dist.entropy()
-        return log_prob, entropy, value, risk_params
+        log_prob = action_dist.log_prob(action)
+        entropy = action_dist.entropy()
+        return log_prob, entropy, value
 
 
 class LightweightTransformerPolicy(TransformerPolicy):

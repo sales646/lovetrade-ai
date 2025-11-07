@@ -279,6 +279,23 @@ class CachedDataTrainer:
             })
 
         return trajectories
+
+    @staticmethod
+    def _compute_env_equity(env: TradingEnvironment) -> float:
+        """Estimate current equity from balance and open position."""
+        balance = getattr(env, 'balance', 0.0)
+        position = getattr(env, 'position', 0.0)
+        symbol = getattr(env, 'current_symbol', None)
+        data = getattr(env, 'data', {})
+
+        if symbol and symbol in data and len(data[symbol]) > 0:
+            current_step = max(0, getattr(env, 'current_step', 0) - 1)
+            current_step = min(current_step, len(data[symbol]) - 1)
+            last_price = float(data[symbol][current_step].get('close', 0.0))
+        else:
+            last_price = 0.0
+
+        return float(balance) + float(position) * last_price
     
     def compute_advantages(self, trajectories: List[Dict], gamma: float = 0.99,
                            lam: float = 0.95) -> List[Dict]:
@@ -405,7 +422,7 @@ class CachedDataTrainer:
                 'final_equity': final_equity,
                 'return_pct': ((final_equity - env.initial_balance) / env.initial_balance) * 100
             })
-        
+
         # Calculate metrics
         returns = [r['return_pct'] for r in results]
         mean_return = np.mean(returns)
