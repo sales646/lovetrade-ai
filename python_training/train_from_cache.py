@@ -17,8 +17,8 @@ from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# Load environment from python_training/.env
-load_dotenv(Path(__file__).parent / ".env")
+# Load environment from root /.env
+load_dotenv("/.env")
 
 # Import training modules
 from trading_environment import TradingEnvironment
@@ -42,26 +42,96 @@ class CachedDataTrainer:
         print(f"📁 Cache directory: {self.cache_dir}")
         
     def load_cached_data(self) -> Dict[str, pd.DataFrame]:
-        """Load all cached parquet files."""
+        """Load all cached raw files (S3 and Binance)."""
         print("\n📊 Loading cached market data...")
         
         data = {}
         
-        # Load stocks
-        stock_files = glob.glob(str(self.cache_dir / "symbols" / "stocks" / "*.parquet"))
-        for file_path in stock_files:
-            symbol = Path(file_path).stem
-            df = pd.read_parquet(file_path)
-            data[symbol] = df
-            print(f"  ✅ {symbol}: {len(df):,} bars")
+        # Load S3 stock data
+        s3_base = self.cache_dir / "raw" / "s3" / "us_stock_sip" / "minute_aggs_v1"
+        if s3_base.exists():
+            print("  📦 Loading S3 stock data...")
+            for year_dir in s3_base.iterdir():
+                if not year_dir.is_dir():
+                    continue
+                for month_dir in year_dir.iterdir():
+                    if not month_dir.is_dir():
+                        continue
+                    for csv_gz_file in month_dir.glob("*.csv.gz"):
+                        try:
+                            df = pd.read_csv(csv_gz_file, compression='gzip')
+                            
+                            # Extract symbol from filename (assuming format: SYMBOL_date.csv.gz)
+                            symbol = csv_gz_file.stem.split('_')[0]
+                            
+                            # Standardize column names
+                            if 'timestamp' not in df.columns and 't' in df.columns:
+                                df['timestamp'] = pd.to_datetime(df['t'], unit='ms')
+                            if 'open' not in df.columns and 'o' in df.columns:
+                                df['open'] = df['o']
+                            if 'high' not in df.columns and 'h' in df.columns:
+                                df['high'] = df['h']
+                            if 'low' not in df.columns and 'l' in df.columns:
+                                df['low'] = df['l']
+                            if 'close' not in df.columns and 'c' in df.columns:
+                                df['close'] = df['c']
+                            if 'volume' not in df.columns and 'v' in df.columns:
+                                df['volume'] = df['v']
+                            
+                            # Append to existing data or create new
+                            if symbol in data:
+                                data[symbol] = pd.concat([data[symbol], df], ignore_index=True)
+                            else:
+                                data[symbol] = df
+                        except Exception as e:
+                            print(f"    ⚠️ Error loading {csv_gz_file.name}: {e}")
         
-        # Load crypto
-        crypto_files = glob.glob(str(self.cache_dir / "symbols" / "crypto" / "*.parquet"))
-        for file_path in crypto_files:
-            symbol = Path(file_path).stem
-            df = pd.read_parquet(file_path)
-            data[symbol] = df
-            print(f"  ✅ {symbol}: {len(df):,} bars")
+        # Load Binance data
+        binance_base = self.cache_dir / "raw" / "binance_vision" / "data" / "spot" / "daily" / "klines"
+        if binance_base.exists():
+            print("  📦 Loading Binance crypto data...")
+            for symbol_dir in binance_base.iterdir():
+                if not symbol_dir.is_dir():
+                    continue
+                
+                symbol = symbol_dir.name
+                interval_dir = symbol_dir / "1m"
+                
+                if not interval_dir.exists():
+                    continue
+                
+                for zip_file in interval_dir.glob("*.zip"):
+                    try:
+                        import zipfile
+                        with zipfile.ZipFile(zip_file, 'r') as z:
+                            # Read first CSV file in zip
+                            csv_files = [f for f in z.namelist() if f.endswith('.csv')]
+                            if csv_files:
+                                with z.open(csv_files[0]) as f:
+                                    df = pd.read_csv(f, header=None, names=[
+                                        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                                        'close_time', 'quote_volume', 'trades', 'taker_buy_base',
+                                        'taker_buy_quote', 'ignore'
+                                    ])
+                                    
+                                    # Convert timestamp
+                                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                                    
+                                    # Keep only needed columns
+                                    df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+                                    
+                                    # Append to existing data or create new
+                                    if symbol in data:
+                                        data[symbol] = pd.concat([data[symbol], df], ignore_index=True)
+                                    else:
+                                        data[symbol] = df
+                    except Exception as e:
+                        print(f"    ⚠️ Error loading {zip_file.name}: {e}")
+        
+        # Sort and deduplicate all data
+        for symbol in data:
+            data[symbol] = data[symbol].sort_values('timestamp').drop_duplicates().reset_index(drop=True)
+            print(f"  ✅ {symbol}: {len(data[symbol]):,} bars")
         
         total_bars = sum(len(df) for df in data.values())
         print(f"\n📈 Total: {len(data)} symbols, {total_bars:,} bars")
