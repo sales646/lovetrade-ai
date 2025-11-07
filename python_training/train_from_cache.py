@@ -9,6 +9,7 @@ import sys
 import glob
 import time
 import torch
+import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -24,6 +25,7 @@ load_dotenv("/.env")
 from trading_environment import TradingEnvironment
 from transformer_policy import TransformerPolicy
 from supabase_logger import SupabaseLogger
+from bc_pretrain import pretrain_bc
 
 class CachedDataTrainer:
     """Train RL policy from cached market data."""
@@ -36,7 +38,7 @@ class CachedDataTrainer:
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         self.supabase: Client = create_client(supabase_url, supabase_key)
-        self.logger = SupabaseLogger(supabase_url, supabase_key)
+        self.logger = SupabaseLogger()
         
         print(f"🎯 Device: {self.device}")
         print(f"📁 Cache directory: {self.cache_dir}")
@@ -151,37 +153,39 @@ class CachedDataTrainer:
         for symbol, df in data.items():
             # Sort by timestamp
             df = df.sort_values('timestamp').reset_index(drop=True)
-            
+
             # Split data
             n = len(df)
             train_end = int(n * train_split)
             val_end = int(n * (train_split + val_split))
-            
+
             train_df = df[:train_end]
             val_df = df[train_end:val_end]
             test_df = df[val_end:]
-            
-            # Create environments
-            if len(train_df) > 100:
-                train_envs.append(TradingEnvironment(
-                    symbol=symbol,
-                    data=train_df,
+
+            def _make_env(split_df: pd.DataFrame):
+                if len(split_df) <= 100:
+                    return None
+                records = split_df.to_dict('records')
+                return TradingEnvironment(
+                    symbols=[symbol],
+                    external_data={symbol: records},
+                    walk_forward=False,
+                    enable_multi_market=False,
                     initial_balance=100000
-                ))
-            
-            if len(val_df) > 100:
-                val_envs.append(TradingEnvironment(
-                    symbol=symbol,
-                    data=val_df,
-                    initial_balance=100000
-                ))
-            
-            if len(test_df) > 100:
-                test_envs.append(TradingEnvironment(
-                    symbol=symbol,
-                    data=test_df,
-                    initial_balance=100000
-                ))
+                )
+
+            env = _make_env(train_df)
+            if env is not None:
+                train_envs.append(env)
+
+            env = _make_env(val_df)
+            if env is not None:
+                val_envs.append(env)
+
+            env = _make_env(test_df)
+            if env is not None:
+                test_envs.append(env)
         
         print(f"  📚 Train: {len(train_envs)} environments")
         print(f"  📊 Val: {len(val_envs)} environments")
@@ -212,138 +216,194 @@ class CachedDataTrainer:
         
         return policy
     
-    def collect_trajectories(self, policy: TransformerPolicy, 
+    def collect_trajectories(self, policy: TransformerPolicy,
                            envs: List[TradingEnvironment],
                            num_episodes: int = 100) -> List[Dict]:
         """Collect trajectories from environments."""
         trajectories = []
-        
-        for episode in range(num_episodes):
+
+        if len(envs) == 0:
+            return trajectories
+
+        policy.eval()
+
+        for _ in range(num_episodes):
             env = np.random.choice(envs)
             state = env.reset()
             done = False
             episode_data = []
-            
+
             while not done:
-                # Get action from policy
-                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
                 with torch.no_grad():
-                    action_probs = policy(state_tensor)
-                    action = torch.argmax(action_probs, dim=-1).item()
-                
-                # Convert to trading action (-1, 0, 1)
-                trading_action = action - 1
-                
-                # Step environment
-                next_state, reward, done, info = env.step(trading_action)
-                
+                    action, size, value, log_prob, entropy, _ = policy(state_tensor)
+                    action = int(action.item())
+                    size = int(size.item())
+                    value = float(value.item())
+                    log_prob = float(log_prob.item())
+
+                next_state, reward, done, info = env.step(action)
+
+                if done:
+                    next_value = 0.0
+                else:
+                    next_state_tensor = torch.as_tensor(next_state, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    with torch.no_grad():
+                        next_value = float(policy.get_value(next_state_tensor).item())
+
                 episode_data.append({
                     'state': state,
-                    'action': trading_action,
+                    'action': action,
+                    'size': size,
+                    'log_prob': log_prob,
+                    'value': value,
                     'reward': reward,
-                    'next_state': next_state,
-                    'done': done
+                    'done': done,
+                    'next_value': next_value
                 })
-                
+
                 state = next_state
-            
+
+            final_symbol = env.current_symbol
+            final_price = 0.0
+            if final_symbol in env.data and env.current_step > 0:
+                last_index = min(env.current_step - 1, len(env.data[final_symbol]) - 1)
+                final_price = float(env.data[final_symbol][last_index]['close'])
+            final_equity = env.balance + env.position * final_price
+
             trajectories.append({
-                'symbol': env.symbol,
+                'symbol': final_symbol,
                 'data': episode_data,
                 'total_reward': sum(t['reward'] for t in episode_data),
-                'final_equity': env.equity
+                'final_equity': final_equity
             })
-        
+
         return trajectories
     
-    def compute_advantages(self, trajectories: List[Dict], gamma: float = 0.99) -> List[Dict]:
-        """Compute GAE advantages."""
+    def compute_advantages(self, trajectories: List[Dict], gamma: float = 0.99,
+                           lam: float = 0.95) -> List[Dict]:
+        """Compute GAE advantages using policy value estimates."""
         for traj in trajectories:
-            rewards = [t['reward'] for t in traj['data']]
-            
-            # Compute returns
-            returns = []
-            R = 0
-            for r in reversed(rewards):
-                R = r + gamma * R
-                returns.insert(0, R)
-            
-            # Add to trajectory
-            for i, t in enumerate(traj['data']):
-                t['return'] = returns[i]
-                t['advantage'] = returns[i]  # Simplified, no baseline
-        
+            advantage = 0.0
+            returns = 0.0
+
+            for step in reversed(traj['data']):
+                td_error = step['reward'] + gamma * step['next_value'] - step['value']
+                advantage = td_error + gamma * lam * advantage
+                returns = step['value'] + advantage
+                step['advantage'] = advantage
+                step['return'] = returns
+
         return trajectories
     
     def update_policy(self, policy: TransformerPolicy, optimizer: torch.optim.Optimizer,
-                     trajectories: List[Dict], clip_epsilon: float = 0.2) -> Dict:
-        """PPO policy update."""
+                     trajectories: List[Dict], clip_epsilon: float = 0.2,
+                     value_coef: float = 0.5, entropy_coef: float = 0.01) -> Dict:
+        """PPO policy update using stored trajectories."""
         policy.train()
-        
-        # Prepare batch
+
         states = []
         actions = []
+        sizes = []
+        old_log_probs = []
+        returns = []
         advantages = []
-        
+
         for traj in trajectories:
-            for t in traj['data']:
-                states.append(t['state'])
-                actions.append(t['action'] + 1)  # Convert back to 0,1,2
-                advantages.append(t['advantage'])
-        
-        states = torch.FloatTensor(np.array(states)).to(self.device)
-        actions = torch.LongTensor(actions).to(self.device)
-        advantages = torch.FloatTensor(advantages).to(self.device)
-        
-        # Normalize advantages
+            for step in traj['data']:
+                states.append(step['state'])
+                actions.append(step['action'])
+                sizes.append(step['size'])
+                old_log_probs.append(step['log_prob'])
+                returns.append(step['return'])
+                advantages.append(step['advantage'])
+
+        if len(states) == 0:
+            return {
+                'policy_loss': 0.0,
+                'value_loss': 0.0,
+                'entropy': 0.0,
+                'approx_kl': 0.0
+            }
+
+        states = torch.as_tensor(np.array(states), dtype=torch.float32, device=self.device)
+        actions = torch.as_tensor(actions, dtype=torch.long, device=self.device)
+        sizes = torch.as_tensor(sizes, dtype=torch.long, device=self.device)
+        old_log_probs = torch.as_tensor(old_log_probs, dtype=torch.float32, device=self.device)
+        returns = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
+        advantages = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
+
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
-        # Forward pass
-        action_probs = policy(states)
-        log_probs = torch.log(action_probs.gather(1, actions.unsqueeze(1)) + 1e-8).squeeze()
-        
-        # PPO loss
-        loss = -(log_probs * advantages).mean()
-        
-        # Update
+
+        log_probs, entropy, values, _ = policy.evaluate_actions(states, actions, sizes)
+
+        ratios = torch.exp(log_probs - old_log_probs)
+        surr1 = ratios * advantages
+        surr2 = torch.clamp(ratios, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
+
+        value_loss = F.mse_loss(values, returns)
+        entropy_loss = -entropy.mean()
+
+        loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
+
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
         optimizer.step()
-        
+
+        with torch.no_grad():
+            approx_kl = 0.5 * torch.mean((old_log_probs - log_probs) ** 2)
+
         return {
-            'loss': loss.item(),
-            'mean_advantage': advantages.mean().item()
+            'policy_loss': policy_loss.item(),
+            'value_loss': value_loss.item(),
+            'entropy': entropy.mean().item(),
+            'approx_kl': approx_kl.item()
         }
     
     def evaluate(self, policy: TransformerPolicy, envs: List[TradingEnvironment],
                 num_episodes: int = 50) -> Dict:
         """Evaluate policy performance."""
         policy.eval()
-        
+
         results = []
+        if len(envs) == 0:
+            return {
+                'mean_reward': 0.0,
+                'mean_return': 0.0,
+                'sharpe_ratio': 0.0,
+                'win_rate': 0.0,
+                'max_return': 0.0,
+                'min_return': 0.0
+            }
         for _ in range(num_episodes):
             env = np.random.choice(envs)
             state = env.reset()
             done = False
             total_reward = 0
-            
+
             while not done:
-                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                state_tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
                 with torch.no_grad():
-                    action_probs = policy(state_tensor)
-                    action = torch.argmax(action_probs, dim=-1).item()
-                
-                trading_action = action - 1
-                next_state, reward, done, _ = env.step(trading_action)
-                
+                    action = int(policy.get_action(state_tensor, deterministic=True).item())
+
+                next_state, reward, done, _ = env.step(action)
+
                 total_reward += reward
                 state = next_state
-            
+
+            final_symbol = env.current_symbol
+            final_price = 0.0
+            if final_symbol in env.data and env.current_step > 0:
+                last_index = min(env.current_step - 1, len(env.data[final_symbol]) - 1)
+                final_price = float(env.data[final_symbol][last_index]['close'])
+            final_equity = env.balance + env.position * final_price
+
             results.append({
                 'total_reward': total_reward,
-                'final_equity': env.equity,
-                'return_pct': ((env.equity - env.initial_balance) / env.initial_balance) * 100
+                'final_equity': final_equity,
+                'return_pct': ((final_equity - env.initial_balance) / env.initial_balance) * 100
             })
         
         # Calculate metrics
@@ -367,7 +427,7 @@ class CachedDataTrainer:
                               metrics: Dict, symbols: List[str]) -> str:
         """Save trained model to Supabase storage."""
         print("\n💾 Saving model to Supabase...")
-        
+
         # Save model to temporary file
         model_name = f"transformer_policy_{run_id}_{int(time.time())}.pth"
         temp_path = f"/tmp/{model_name}"
@@ -410,8 +470,66 @@ class CachedDataTrainer:
         
         print(f"  ✅ Model saved: {model_name}")
         print(f"  ✅ Size: {file_size / 1024 / 1024:.2f} MB")
-        
+
         return storage_path
+
+    def maybe_run_bc_pretraining(self, policy: TransformerPolicy,
+                                 data: Dict[str, pd.DataFrame],
+                                 run_id: Optional[str] = None) -> Optional[Dict]:
+        """Run BC pretraining if checkpoint missing and load weights."""
+        checkpoint_path = Path("checkpoints/bc/bc_best.pt")
+        symbol_records = {
+            symbol: df.sort_values('timestamp').to_dict('records')
+            for symbol, df in data.items() if len(df) > 0
+        }
+
+        if len(symbol_records) == 0:
+            print("⚠️  No data available for BC pretraining.")
+            return None
+
+        if checkpoint_path.exists():
+            print("📦 Loading existing BC checkpoint...")
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            policy.load_state_dict(checkpoint['model_state_dict'])
+            policy.to(self.device)
+            policy.eval()
+            metrics = {
+                'final_loss': checkpoint.get('loss'),
+                'final_accuracy': checkpoint.get('accuracy'),
+                'epochs_trained': checkpoint.get('epoch', 0) + 1,
+            }
+        else:
+            bc_env = TradingEnvironment(
+                symbols=list(symbol_records.keys()),
+                external_data=symbol_records,
+                walk_forward=False,
+                enable_multi_market=True,
+                initial_balance=100000
+            )
+            metrics = pretrain_bc(
+                policy,
+                symbols=list(symbol_records.keys()),
+                env=bc_env,
+                device=str(self.device)
+            )
+            if checkpoint_path.exists():
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                policy.load_state_dict(checkpoint['model_state_dict'])
+            policy.to(self.device)
+            policy.eval()
+
+        if run_id is not None and metrics is not None:
+            self.supabase.table('training_metrics').insert({
+                'run_id': run_id,
+                'epoch': 0,
+                'split': 'bc',
+                'mean_reward': None,
+                'sharpe_ratio': None,
+                'win_rate': metrics.get('final_accuracy'),
+                'policy_loss': metrics.get('final_loss')
+            }).execute()
+
+        return metrics
     
     def train(self, num_epochs: int = 100, 
              episodes_per_epoch: int = 100,
@@ -428,11 +546,15 @@ class CachedDataTrainer:
         
         # Create environments
         train_envs, val_envs, test_envs = self.create_environments(data)
-        
+
         # Initialize policy
+        if len(train_envs) == 0:
+            print("❌ No training environments could be created.")
+            return
+
         policy = self.initialize_policy(train_envs[0])
         optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
-        
+
         # Create training run in Supabase
         run_response = self.supabase.table('training_runs').insert({
             'run_name': f'cached_training_{int(time.time())}',
@@ -451,12 +573,18 @@ class CachedDataTrainer:
                 'val_envs': len(val_envs)
             }
         }).execute()
-        
+
         run_id = run_response.data[0]['id']
         print(f"\n🚀 Training run ID: {run_id}")
-        
+
+        bc_metrics = self.maybe_run_bc_pretraining(policy, data, run_id)
+        if bc_metrics:
+            print("\n🎓 BC Pretraining Summary:")
+            for key, value in bc_metrics.items():
+                print(f"  {key}: {value}")
+
         best_sharpe = -float('inf')
-        
+
         # Training loop
         print("\n" + "="*70)
         print("🎯 STARTING TRAINING")
@@ -478,7 +606,7 @@ class CachedDataTrainer:
             val_metrics = self.evaluate(policy, val_envs, num_episodes=20)
             
             epoch_time = time.time() - epoch_start
-            
+
             # Log metrics to Supabase
             self.supabase.table('training_metrics').insert({
                 'run_id': run_id,
@@ -487,12 +615,17 @@ class CachedDataTrainer:
                 'mean_reward': val_metrics['mean_reward'],
                 'sharpe_ratio': val_metrics['sharpe_ratio'],
                 'win_rate': val_metrics['win_rate'],
-                'policy_loss': update_metrics['loss']
+                'policy_loss': update_metrics['policy_loss'],
+                'value_loss': update_metrics['value_loss'],
+                'entropy': update_metrics['entropy'],
+                'approx_kl': update_metrics['approx_kl']
             }).execute()
-            
+
             # Print progress
             print(f"\nEpoch {epoch + 1}/{num_epochs} ({epoch_time:.1f}s)")
-            print(f"  Loss: {update_metrics['loss']:.4f}")
+            print(f"  Policy Loss: {update_metrics['policy_loss']:.4f}")
+            print(f"  Value Loss: {update_metrics['value_loss']:.4f}")
+            print(f"  Entropy: {update_metrics['entropy']:.4f}")
             print(f"  Val Sharpe: {val_metrics['sharpe_ratio']:.3f}")
             print(f"  Val Win Rate: {val_metrics['win_rate']*100:.1f}%")
             print(f"  Val Return: {val_metrics['mean_return']:.2f}%")
