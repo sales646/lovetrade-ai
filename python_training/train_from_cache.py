@@ -53,19 +53,25 @@ class CachedDataTrainer:
 
         numeric_series = pd.to_numeric(series, errors='coerce')
         if numeric_series.notna().any():
-            magnitude = numeric_series.abs().max()
-
-            if pd.isna(magnitude):
+            numeric_non_na = numeric_series.dropna()
+            if numeric_non_na.empty:
                 return pd.to_datetime(series, errors='coerce')
 
-            if magnitude >= 10 ** 18:
-                unit = 'ns'
-            elif magnitude >= 10 ** 15:
-                unit = 'us'
-            else:
-                unit = 'ms'
+            scaled_series = numeric_series
+            scaled_non_na = numeric_non_na
+            timestamp_max_value = pd.Timestamp.max.value
+            units = ['ns', 'us', 'ms']
+            unit_index = 0
 
-            return pd.to_datetime(numeric_series, unit=unit, errors='coerce')
+            max_abs_value = scaled_non_na.abs().max()
+            while max_abs_value > timestamp_max_value and unit_index < len(units) - 1:
+                scaled_series = scaled_series / 1_000
+                scaled_non_na = scaled_non_na / 1_000
+                unit_index += 1
+                max_abs_value = scaled_non_na.abs().max()
+
+            unit = units[unit_index]
+            return pd.to_datetime(scaled_series, unit=unit, errors='coerce')
 
         return pd.to_datetime(series, errors='coerce')
 
