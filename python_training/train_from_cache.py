@@ -14,9 +14,10 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from tqdm import tqdm
 
 # Load environment from root /.env
 load_dotenv("/.env")
@@ -78,21 +79,12 @@ class CachedDataTrainer:
         s3_base = self.cache_dir / "raw" / "s3" / "us_stock_sip" / "minute_aggs_v1"
         if s3_base.exists():
             print("  📦 Loading S3 stock data...")
-            for year_dir in s3_base.iterdir():
-                if not year_dir.is_dir():
-                    continue
-                for month_dir in year_dir.iterdir():
-                    if not month_dir.is_dir():
-                        continue
-                    for csv_gz_file in month_dir.glob("*.csv.gz"):
+            s3_files = sorted(s3_base.rglob("*.csv.gz"))
+            if s3_files:
+                with tqdm(total=len(s3_files), desc="S3 Stocks", unit="file") as pbar:
+                    for csv_gz_file in s3_files:
                         try:
                             df = pd.read_csv(csv_gz_file, compression='gzip')
-                            
-                            # Normalize timestamp column before further processing
-                            if 'timestamp' in df.columns:
-                                df['timestamp'] = self._normalize_timestamp_column(df, 'timestamp')
-                            elif 't' in df.columns:
-                                df['timestamp'] = self._normalize_timestamp_column(df, 't')
 
                             # Extract symbol from filename (assuming format: SYMBOL_date.csv.gz)
                             symbol = csv_gz_file.stem.split('_')[0]
@@ -108,7 +100,7 @@ class CachedDataTrainer:
                                 df['close'] = df['c']
                             if 'volume' not in df.columns and 'v' in df.columns:
                                 df['volume'] = df['v']
-                            
+
                             # Append to existing data or create new
                             if symbol in data:
                                 data[symbol] = pd.concat([data[symbol], df], ignore_index=True)
@@ -116,48 +108,56 @@ class CachedDataTrainer:
                                 data[symbol] = df
                         except Exception as e:
                             print(f"    ⚠️ Error loading {csv_gz_file.name}: {e}")
+                        finally:
+                            pbar.update(1)
         
         # Load Binance data
         binance_base = self.cache_dir / "raw" / "binance_vision" / "data" / "spot" / "daily" / "klines"
         if binance_base.exists():
             print("  📦 Loading Binance crypto data...")
+            binance_files: List[Tuple[str, Path]] = []
             for symbol_dir in binance_base.iterdir():
                 if not symbol_dir.is_dir():
                     continue
-                
-                symbol = symbol_dir.name
+
                 interval_dir = symbol_dir / "1m"
-                
                 if not interval_dir.exists():
                     continue
-                
+
                 for zip_file in interval_dir.glob("*.zip"):
-                    try:
-                        import zipfile
-                        with zipfile.ZipFile(zip_file, 'r') as z:
-                            # Read first CSV file in zip
-                            csv_files = [f for f in z.namelist() if f.endswith('.csv')]
-                            if csv_files:
-                                with z.open(csv_files[0]) as f:
-                                    df = pd.read_csv(f, header=None, names=[
-                                        'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                                        'close_time', 'quote_volume', 'trades', 'taker_buy_base',
-                                        'taker_buy_quote', 'ignore'
-                                    ])
-                                    
-                                    # Normalize timestamp to handle mixed resolutions
-                                    df['timestamp'] = self._normalize_timestamp_column(df, 'timestamp')
-                                    
-                                    # Keep only needed columns
-                                    df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-                                    
-                                    # Append to existing data or create new
-                                    if symbol in data:
-                                        data[symbol] = pd.concat([data[symbol], df], ignore_index=True)
-                                    else:
-                                        data[symbol] = df
-                    except Exception as e:
-                        print(f"    ⚠️ Error loading {zip_file.name}: {e}")
+                    binance_files.append((symbol_dir.name, zip_file))
+
+            if binance_files:
+                with tqdm(total=len(binance_files), desc="Binance Crypto", unit="file") as pbar:
+                    for symbol, zip_file in binance_files:
+                        try:
+                            import zipfile
+                            with zipfile.ZipFile(zip_file, 'r') as z:
+                                # Read first CSV file in zip
+                                csv_files = [f for f in z.namelist() if f.endswith('.csv')]
+                                if csv_files:
+                                    with z.open(csv_files[0]) as f:
+                                        df = pd.read_csv(f, header=None, names=[
+                                            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                                            'close_time', 'quote_volume', 'trades', 'taker_buy_base',
+                                            'taker_buy_quote', 'ignore'
+                                        ])
+
+                                        # Convert timestamp
+                                        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+                                        # Keep only needed columns
+                                        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+
+                                        # Append to existing data or create new
+                                        if symbol in data:
+                                            data[symbol] = pd.concat([data[symbol], df], ignore_index=True)
+                                        else:
+                                            data[symbol] = df
+                        except Exception as e:
+                            print(f"    ⚠️ Error loading {zip_file.name}: {e}")
+                        finally:
+                            pbar.update(1)
         
         # Sort and deduplicate all data
         for symbol in data:
