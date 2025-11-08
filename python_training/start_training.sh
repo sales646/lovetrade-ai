@@ -10,6 +10,7 @@ echo "  - Transformer policy networks"
 echo "  - BF16 mixed precision"
 echo "  - Advanced profit-optimized rewards"
 echo "  - Will scale up after successful test"
+echo "  - Use --no-allow-synthetic-data with train.py to require real Polygon S3 data"
 echo
 echo "Press Ctrl+C to stop training"
 echo "======================================================================"

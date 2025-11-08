@@ -251,13 +251,20 @@ class S3DataLoader:
         self,
         cache_size_gb: float = 10.0,
         max_synthetic_symbols: int = 256,
+        allow_synthetic: bool = True,
     ) -> None:
         self.max_synthetic_symbols = max_synthetic_symbols
         self._symbol_cache: Optional[List[str]] = None
+        self.allow_synthetic = allow_synthetic
 
         try:
             self.market_loader = S3MarketDataLoader(cache_size_gb=cache_size_gb)
         except Exception as exc:
+            if not self.allow_synthetic:
+                self._raise_missing_credentials(
+                    "Unable to initialise the Polygon S3 market loader.",
+                    details=str(exc),
+                )
             print(f"⚠️  Could not initialise S3 market loader: {exc}")
             print("   Falling back to deterministic synthetic data.")
             self.market_loader = None
@@ -272,6 +279,16 @@ class S3DataLoader:
             symbol = f"SYN{i:04d}{'USD' if asset_type == 'crypto' else ''}"
             synthetic.append(SyntheticSymbolConfig(symbol=symbol, asset_type=asset_type))
         return synthetic
+
+    def _raise_missing_credentials(self, message: str, details: Optional[str] = None) -> None:
+        base = (
+            f"{message}\n"
+            "Synthetic data has been disabled. Configure Polygon S3 credentials by setting "
+            "POLYGON_S3_ACCESS_KEY, POLYGON_S3_SECRET_KEY, POLYGON_S3_ENDPOINT, and POLYGON_S3_BUCKET."
+        )
+        if details:
+            base = f"{base}\nLast error: {details}"
+        raise RuntimeError(base)
 
     def discover_all_symbols(self, max_symbols: int = 200) -> List[str]:
         if self._symbol_cache is not None:
@@ -359,6 +376,11 @@ class S3DataLoader:
                     symbol_frames[symbol] = crypto_frames[symbol]
 
         if not symbol_frames:
+            if not self.allow_synthetic:
+                self._raise_missing_credentials(
+                    "No Polygon S3 data was returned for the requested symbols.",
+                    details="Check that the credentials grant access and that the bucket exists.",
+                )
             print("⚠️  Requested symbols not found in S3 dump; falling back to synthetic data")
 
         prepared: Dict[str, List[Dict[str, float]]] = {}
@@ -388,6 +410,10 @@ class S3DataLoader:
             return {}
 
         if self.market_loader is None:
+            if not self.allow_synthetic:
+                self._raise_missing_credentials(
+                    "Polygon S3 access is unavailable during loader initialisation.",
+                )
             print("⚠️  Using synthetic market data (no S3 credentials available)")
             return {
                 symbol: self._generate_synthetic_series(symbol, start_date, end_date)
