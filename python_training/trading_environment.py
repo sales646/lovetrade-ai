@@ -15,12 +15,15 @@ import pandas as pd
 from supabase import create_client, Client
 from datetime import datetime
 import json
+from threading import Lock
 
 
 class TradingEnvironment:
     """Real trading environment using all available historical data"""
-    
+
     _data_cache: Dict = {}
+    _stats_cache: Dict = {}
+    _cache_lock: Lock = Lock()
     
     def __init__(
         self,
@@ -92,6 +95,13 @@ class TradingEnvironment:
         # External preloaded data (bypasses Supabase fetch)
         self.external_data = external_data or {}
 
+        self._cache_key = self._make_cache_key(
+            self.symbols,
+            self.timeframe,
+            self.augment_data,
+            self.external_data
+        )
+
         # Load data
         self._load_historical_data()
         if self.enable_multi_market:
@@ -101,8 +111,42 @@ class TradingEnvironment:
         self.state_dim = 52
         self.action_space_dim = 3
     
+    @classmethod
+    def _make_cache_key(
+        cls,
+        symbols: List[str],
+        timeframe: str,
+        augment: bool,
+        external_data: Optional[Dict]
+    ) -> Tuple:
+        symbols_key = tuple(sorted(symbols)) if symbols else tuple()
+
+        if isinstance(external_data, dict):
+            try:
+                external_key = tuple(sorted(external_data.keys()))
+            except Exception:
+                external_key = id(external_data)
+        elif external_data is None:
+            external_key = None
+        else:
+            external_key = id(external_data)
+
+        return (symbols_key, timeframe, augment, external_key)
+
     def _load_historical_data(self):
         """Load all available historical data"""
+        with self._cache_lock:
+            cached = self._data_cache.get(self._cache_key)
+
+        if cached:
+            self.data = cached['data']
+            self.symbol_types = cached['symbol_types']
+            cached_stats = cached.get('symbol_stats')
+            if cached_stats and self.enable_multi_market:
+                self.symbol_stats = cached_stats
+            print(f"📊 Reusing cached market data for {len(self.data)} symbols...")
+            return
+
         if self.external_data:
             print(f"📊 Loading preloaded data for {len(self.external_data)} symbols...")
             for symbol, rows in self.external_data.items():
@@ -119,66 +163,81 @@ class TradingEnvironment:
                 self.symbol_types[symbol] = "crypto" if is_crypto else "stock"
 
             print(f"✅ Loaded data for {len(self.data)} symbols from cache")
-            return
+        else:
+            print(f"📊 Loading historical data for {len(self.symbols)} symbols...")
 
-        print(f"📊 Loading historical data for {len(self.symbols)} symbols...")
+            for symbol in self.symbols:
+                # Classify symbol type
+                is_crypto = symbol.endswith(('USDT', 'BUSD', 'USD', 'BTC', 'ETH')) and len(symbol) > 4
+                self.symbol_types[symbol] = "crypto" if is_crypto else "stock"
 
-        for symbol in self.symbols:
-            # Classify symbol type
-            is_crypto = symbol.endswith(('USDT', 'BUSD', 'USD', 'BTC', 'ETH')) and len(symbol) > 4
-            self.symbol_types[symbol] = "crypto" if is_crypto else "stock"
-            
-            # Load from Supabase
-            if self.supabase:
-                try:
-                    response = self.supabase.table("historical_bars") \
-                        .select("*") \
-                        .eq("symbol", symbol) \
-                        .eq("timeframe", self.timeframe) \
-                        .order("timestamp", desc=False) \
-                        .limit(1000000) \
-                        .execute()
-                    
-                    if response.data:
-                        self.data[symbol] = response.data
-                        print(f"  ✅ {symbol}: {len(response.data):,} bars")
-                    else:
-                        print(f"  ⚠️  {symbol}: No data found")
-                except Exception as e:
-                    print(f"  ❌ {symbol}: Error loading - {e}")
-            
-            # Augment if requested
-            if self.augment_data and symbol in self.data:
-                original_len = len(self.data[symbol])
-                augmented = []
-                for bar in self.data[symbol]:
-                    # 2 augmented versions
-                    for _ in range(2):
-                        aug = bar.copy()
-                        noise = 1 + np.random.uniform(-0.01, 0.01)
-                        aug['open'] = float(bar['open']) * noise
-                        aug['high'] = float(bar['high']) * noise
-                        aug['low'] = float(bar['low']) * noise
-                        aug['close'] = float(bar['close']) * noise
-                        aug['volume'] = int(float(bar['volume']) * (1 + np.random.uniform(-0.05, 0.05)))
-                        augmented.append(aug)
-                
-                self.data[symbol].extend(augmented)
-                print(f"     📈 Augmented to {len(self.data[symbol]):,} bars")
-        
-        print(f"✅ Loaded data for {len(self.data)} symbols")
-    
+                # Load from Supabase
+                if self.supabase:
+                    try:
+                        response = self.supabase.table("historical_bars") \
+                            .select("*") \
+                            .eq("symbol", symbol) \
+                            .eq("timeframe", self.timeframe) \
+                            .order("timestamp", desc=False) \
+                            .limit(1000000) \
+                            .execute()
+
+                        if response.data:
+                            self.data[symbol] = response.data
+                            print(f"  ✅ {symbol}: {len(response.data):,} bars")
+                        else:
+                            print(f"  ⚠️  {symbol}: No data found")
+                    except Exception as e:
+                        print(f"  ❌ {symbol}: Error loading - {e}")
+
+                # Augment if requested
+                if self.augment_data and symbol in self.data:
+                    original_len = len(self.data[symbol])
+                    augmented = []
+                    for bar in self.data[symbol]:
+                        # 2 augmented versions
+                        for _ in range(2):
+                            aug = bar.copy()
+                            noise = 1 + np.random.uniform(-0.01, 0.01)
+                            aug['open'] = float(bar['open']) * noise
+                            aug['high'] = float(bar['high']) * noise
+                            aug['low'] = float(bar['low']) * noise
+                            aug['close'] = float(bar['close']) * noise
+                            aug['volume'] = int(float(bar['volume']) * (1 + np.random.uniform(-0.05, 0.05)))
+                            augmented.append(aug)
+
+                    self.data[symbol].extend(augmented)
+                    print(f"     📈 Augmented to {len(self.data[symbol]):,} bars")
+
+            print(f"✅ Loaded data for {len(self.data)} symbols")
+
+        with self._cache_lock:
+            self._data_cache[self._cache_key] = {
+                'data': self.data,
+                'symbol_types': self.symbol_types
+            }
+
     def _compute_symbol_stats(self):
         """Compute per-symbol statistics for normalization"""
+        stats_cache_key = (self._cache_key, self.enable_multi_market)
+
+        with self._cache_lock:
+            cached_stats = self._stats_cache.get(stats_cache_key)
+
+        if cached_stats:
+            self.symbol_stats = cached_stats
+            print(f"📊 Reusing cached symbol statistics for {len(self.symbol_stats)} symbols...")
+            return
+
         print("📊 Computing symbol statistics...")
-        
+
         for symbol, bars in self.data.items():
             if len(bars) < 2:
                 continue
-            
+
             prices = [float(b['close']) for b in bars]
             log_returns = [np.log(prices[i] / prices[i-1]) for i in range(1, len(prices))]
-            
+
             atrs = []
             for i in range(1, len(bars)):
                 high = float(bars[i]['high'])
@@ -186,14 +245,21 @@ class TradingEnvironment:
                 prev_close = float(bars[i-1]['close'])
                 tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
                 atrs.append(tr)
-            
+
             self.symbol_stats[symbol] = {
                 'mean_return': np.mean(log_returns),
                 'std_return': np.std(log_returns) if len(log_returns) > 1 else 0.01,
                 'avg_atr': np.mean(atrs) if len(atrs) > 0 else 1.0,
                 'avg_price': np.mean(prices)
             }
-        
+
+        with self._cache_lock:
+            cached_entry = self._data_cache.get(self._cache_key, {})
+            if cached_entry:
+                cached_entry['symbol_stats'] = self.symbol_stats
+                self._data_cache[self._cache_key] = cached_entry
+            self._stats_cache[stats_cache_key] = self.symbol_stats
+
         print(f"✅ Computed stats for {len(self.symbol_stats)} symbols")
     
     def reset(self, seed: int = None, phase: str = "train") -> np.ndarray:
