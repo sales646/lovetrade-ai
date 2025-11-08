@@ -19,8 +19,8 @@ from progress import PhaseProgress
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimized GPU training")
-    parser.add_argument("--epochs", type=int, default=50, help="Number of PPO epochs")
-    parser.add_argument("--bc-epochs", type=int, default=20, help="Number of BC epochs")
+    parser.add_argument("--epochs", type=int, default=150, help="Number of PPO epochs")
+    parser.add_argument("--bc-epochs", type=int, default=40, help="Number of BC epochs")
     parser.add_argument("--bc-episodes", type=int, default=400, help="Expert episodes for BC pretraining")
     parser.add_argument("--bc-steps", type=int, default=256, help="Steps per expert episode")
     parser.add_argument("--bc-batch-size", type=int, default=8192, help="Global BC batch size")
@@ -33,6 +33,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mixed-precision", choices=["bf16", "fp16"], default="bf16")
     parser.add_argument("--compile-mode", default="reduce-overhead", help="torch.compile mode")
     parser.add_argument("--checkpoint-splits", type=int, default=3, help="Gradient checkpoint partitions")
+    parser.add_argument(
+        "--data-start",
+        default="2023-10-01",
+        help="Historical data start date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--data-end",
+        default="2024-03-31",
+        help="Historical data end date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--symbol-limit",
+        type=int,
+        default=150,
+        help="Maximum number of symbols to include in training",
+    )
     parser.add_argument("--enable-cuda-graph", action="store_true", help="Capture CUDA graph for BC training")
     
     # Early stopping arguments
@@ -184,7 +200,7 @@ class EarlyStopping:
 # ====================
 # STEP 2: Load Data
 # ====================
-def load_data(rank: int):
+def load_data(rank: int, args: argparse.Namespace):
     if rank == 0:
         print("\n[STEP 2/6] Loading Data from S3")
     from s3_data_loader import S3DataLoader
@@ -193,35 +209,48 @@ def load_data(rank: int):
 
     if rank == 0:
         print("   Discovering symbols...")
-    symbols = loader.discover_all_symbols(max_symbols=200)
+
+    discovery_limit = max(args.symbol_limit * 2, args.symbol_limit + 50)
+    symbols = loader.discover_all_symbols(max_symbols=discovery_limit)
+
     if rank == 0:
         print(f"✅ Found {len(symbols)} symbols")
 
+    if not symbols:
+        return loader, {}, []
+
+    symbols_to_use = symbols[: min(args.symbol_limit, len(symbols))]
+
     if rank == 0:
-        print("   Loading market data (January 2024)...")
+        print(f"   Using {len(symbols_to_use)} symbols for training")
+        print(
+            f"   Loading market data ({args.data_start} → {args.data_end})..."
+        )
+
     data_map = loader.load_multi_day_data(
-        start_date="2024-01-01",
-        end_date="2024-01-31",
-        symbols=symbols[:100],  # Use first 100 symbols
+        start_date=args.data_start,
+        end_date=args.data_end,
+        symbols=symbols_to_use,
     )
     if rank == 0:
         total_rows = sum(len(rows) for rows in data_map.values())
         print(f"✅ Loaded {total_rows:,} rows across {len(data_map)} symbols")
 
-    return loader, data_map, symbols
+    return loader, data_map, symbols_to_use
 
 # ====================
 # STEP 3: Environment
 # ====================
-def create_environment(data_map, symbols, rank: int):
+def create_environment(data_map, symbols, rank: int, args: argparse.Namespace):
     if rank == 0:
         print("\n[STEP 3/6] Creating Trading Environment")
     from trading_environment import TradingEnvironment
 
-    env_kwargs = dict(symbols=symbols[:100], external_data=data_map, enable_multi_market=True)
+    env_kwargs = dict(symbols=symbols, external_data=data_map, enable_multi_market=True)
     env = TradingEnvironment(**env_kwargs)
     if rank == 0:
         print("✅ Environment ready")
+        print(f"   Symbols: {len(symbols)} | Date range: {args.data_start} → {args.data_end}")
     return env, env_kwargs
 
 # ====================
@@ -748,8 +777,8 @@ def main():
 
     progress = PhaseProgress()
 
-    _, data_map, symbols = load_data(rank)
-    env, env_kwargs = create_environment(data_map, symbols, rank)
+    _, data_map, symbols = load_data(rank, args)
+    env, env_kwargs = create_environment(data_map, symbols, rank, args)
 
     policy, optimizer = build_model(device, args, world_size, rank, progress)
 
