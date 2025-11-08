@@ -395,13 +395,24 @@ def collect_expert_demonstrations(env, args: argparse.Namespace, rank: int):
     for _ in range(args.bc_episodes):
         state = env.reset()
         for _ in range(args.bc_steps):
-            price_change = state[1]  # Assume this is price change
-            if price_change > 0.01:
-                action = 2  # Buy
-            elif price_change < -0.01:
-                action = 0  # Sell
+            symbol = env.current_symbol
+            symbol_data = env.data.get(symbol, [])
+            step_idx = env.current_step
+
+            price_change = 0.0
+            if symbol_data and step_idx < len(symbol_data):
+                current_close = float(symbol_data[step_idx]["close"])
+                next_idx = min(step_idx + 1, len(symbol_data) - 1)
+                next_close = float(symbol_data[next_idx]["close"])
+                if current_close > 0:
+                    price_change = (next_close - current_close) / current_close
+
+            threshold = 0.002  # 0.2% move heuristic
+            if env.position > 0:
+                # Exit long positions on downside momentum, otherwise hold
+                action = 2 if price_change < -threshold else 0
             else:
-                action = 1  # Hold
+                action = 1 if price_change > threshold else 0
 
             states.append(state)
             actions.append(action)
