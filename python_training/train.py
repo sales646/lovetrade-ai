@@ -34,6 +34,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile-mode", default="reduce-overhead", help="torch.compile mode")
     parser.add_argument("--checkpoint-splits", type=int, default=3, help="Gradient checkpoint partitions")
     parser.add_argument("--enable-cuda-graph", action="store_true", help="Capture CUDA graph for BC training")
+    
+    # Early stopping arguments
+    parser.add_argument("--early-stopping-patience", type=int, default=10, help="Early stopping patience")
+    parser.add_argument("--validation-split", type=float, default=0.2, help="Validation data split ratio")
+    parser.add_argument("--no-early-stopping", action="store_true", help="Disable early stopping")
+    parser.add_argument("--min-delta", type=float, default=0.001, help="Minimum improvement for early stopping")
+    parser.add_argument("--top-k-checkpoints", type=int, default=3, help="Keep top K checkpoints")
+    
     return parser.parse_args()
 
 
@@ -73,6 +81,105 @@ def setup_gpu_environment(local_rank: int, rank: int) -> torch.device:
     torch.set_float32_matmul_precision("high")
 
     return device
+
+
+# ====================
+# Early Stopping Class
+# ====================
+
+class EarlyStopping:
+    """
+    Advanced Early Stopping with:
+    - Patience-based stopping on validation metric
+    - Divergence detection (train vs val)
+    - Top-K checkpoint tracking
+    """
+    
+    def __init__(
+        self,
+        patience: int = 10,
+        min_delta: float = 0.001,
+        top_k: int = 3,
+        metric_name: str = "val_loss",
+        mode: str = "min"
+    ):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.top_k = top_k
+        self.metric_name = metric_name
+        self.mode = mode
+        
+        self.counter = 0
+        self.best_metric = float('inf') if mode == "min" else float('-inf')
+        self.best_epoch = 0
+        self.best_checkpoint = None
+        self.top_checkpoints = []  # List of (metric, epoch, path)
+        
+        self.train_metrics = []
+        self.val_metrics = []
+    
+    def __call__(
+        self,
+        epoch: int,
+        val_metric: float,
+        train_metric: Optional[float] = None,
+        checkpoint_path: Optional[str] = None
+    ) -> bool:
+        """
+        Returns True if training should stop
+        """
+        
+        # Track metrics for divergence detection
+        self.val_metrics.append(val_metric)
+        if train_metric is not None:
+            self.train_metrics.append(train_metric)
+        
+        # Check if improved
+        is_better = (
+            (self.mode == "min" and val_metric < self.best_metric - self.min_delta) or
+            (self.mode == "max" and val_metric > self.best_metric + self.min_delta)
+        )
+        
+        if is_better:
+            self.best_metric = val_metric
+            self.best_epoch = epoch
+            self.counter = 0
+            
+            if checkpoint_path:
+                self.best_checkpoint = checkpoint_path
+                # Add to top-K
+                self.top_checkpoints.append((val_metric, epoch, checkpoint_path))
+                # Sort and keep top K
+                if self.mode == "min":
+                    self.top_checkpoints.sort(key=lambda x: x[0])
+                else:
+                    self.top_checkpoints.sort(key=lambda x: x[0], reverse=True)
+                self.top_checkpoints = self.top_checkpoints[:self.top_k]
+        else:
+            self.counter += 1
+        
+        # Divergence detection: if train-val gap is widening rapidly
+        if len(self.train_metrics) >= 5 and len(self.val_metrics) >= 5:
+            recent_train = np.mean(self.train_metrics[-5:])
+            recent_val = np.mean(self.val_metrics[-5:])
+            gap = abs(recent_val - recent_train)
+            
+            if self.mode == "min" and gap > 0.3:  # Val loss >> Train loss
+                return True
+        
+        # Patience exceeded
+        if self.counter >= self.patience:
+            return True
+        
+        return False
+    
+    def get_summary(self) -> str:
+        """Returns a summary of the early stopping state"""
+        return (
+            f"Best {self.metric_name}: {self.best_metric:.6f} at epoch {self.best_epoch}\n"
+            f"Top-{self.top_k} checkpoints: {[(m, e) for m, e, _ in self.top_checkpoints]}"
+        )
+
 
 # ====================
 # STEP 2: Load Data
@@ -241,10 +348,27 @@ def collect_expert_demonstrations(env, args: argparse.Namespace, rank: int):
     if rank == 0:
         print(f"✅ Collected {len(states_np)} transitions")
 
-    states_tensor = torch.from_numpy(states_np)
-    actions_tensor = torch.from_numpy(actions_np)
+    # Split into train/validation
+    val_split_idx = int((1.0 - args.validation_split) * len(states_np))
+    
+    train_states = states_np[:val_split_idx]
+    train_actions = actions_np[:val_split_idx]
+    val_states = states_np[val_split_idx:]
+    val_actions = actions_np[val_split_idx:]
+    
+    if rank == 0:
+        print(f"   Train: {len(train_states)} | Validation: {len(val_states)}")
 
-    return TensorDataset(states_tensor, actions_tensor)
+    train_dataset = TensorDataset(
+        torch.from_numpy(train_states),
+        torch.from_numpy(train_actions)
+    )
+    val_dataset = TensorDataset(
+        torch.from_numpy(val_states),
+        torch.from_numpy(val_actions)
+    )
+
+    return train_dataset, val_dataset
 
 
 def make_dataloader(
@@ -286,8 +410,10 @@ def make_dataloader(
 def bc_training(
     policy,
     optimizer,
-    dataloader: DataLoader,
-    sampler: Optional[DistributedSampler],
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    train_sampler: Optional[DistributedSampler],
+    val_sampler: Optional[DistributedSampler],
     device: torch.device,
     args: argparse.Namespace,
     rank: int,
@@ -299,19 +425,34 @@ def bc_training(
 
     bc_graph = torch.cuda.CUDAGraph() if use_cuda_graph else None
     static_states = static_actions = None
+    
+    # Initialize early stopping
+    early_stopping = None
+    if not args.no_early_stopping:
+        early_stopping = EarlyStopping(
+            patience=args.early_stopping_patience,
+            min_delta=args.min_delta,
+            top_k=args.top_k_checkpoints,
+            metric_name="val_acc",
+            mode="max"
+        )
 
     if rank == 0:
         print("   Training on demonstrations...")
+        if early_stopping:
+            print(f"   Early stopping enabled (patience={args.early_stopping_patience})")
 
     for epoch in range(args.bc_epochs):
-        if sampler is not None:
-            sampler.set_epoch(epoch)
+        # Training phase
+        policy.train()
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
 
         running_loss = 0.0
         running_acc = 0.0
         count = 0
 
-        for states_batch, actions_batch in dataloader:
+        for states_batch, actions_batch in train_loader:
             states_batch = states_batch.to(device, non_blocking=True)
             actions_batch = actions_batch.to(device, non_blocking=True)
 
@@ -460,6 +601,19 @@ def ppo_training(
     mp_dtype = torch.bfloat16 if args.mixed_precision == "bf16" else torch.float16
     scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision == "fp16")
     best_reward = torch.tensor(float("-inf"), device=device)
+    
+    # Initialize early stopping for PPO
+    early_stopping = None
+    if not args.no_early_stopping:
+        early_stopping = EarlyStopping(
+            patience=args.early_stopping_patience,
+            min_delta=args.min_delta,
+            top_k=args.top_k_checkpoints,
+            metric_name="avg_reward",
+            mode="max"
+        )
+        if rank == 0:
+            print(f"   Early stopping enabled (patience={args.early_stopping_patience})")
 
     rollout_steps_per_rank = max(1, args.ppo_rollout_steps // world_size)
 
@@ -547,6 +701,25 @@ def ppo_training(
 
         if rank == 0 and (epoch % 5 == 0 or epoch == args.epochs - 1):
             print(f"Epoch {epoch + 1:3d}/{args.epochs} | Reward: {avg_reward.item():7.4f}")
+        
+        # Early stopping check for PPO
+        if early_stopping and rank == 0:
+            checkpoint_path = f"checkpoints/ppo_epoch_{epoch+1}.pt"
+            
+            should_stop = early_stopping(
+                epoch=epoch,
+                val_metric=avg_reward.item(),
+                checkpoint_path=checkpoint_path
+            )
+            
+            if early_stopping.counter == 0:  # New best model
+                torch.save(get_policy_state_dict(policy), checkpoint_path)
+                print(f"   ✓ New best reward: {avg_reward.item():.4f}")
+            
+            if should_stop:
+                print(f"   🛑 Early stopping triggered at epoch {epoch+1}")
+                print(f"   {early_stopping.get_summary()}")
+                break
 
     if rank == 0:
         print("\n" + "=" * 70)
@@ -584,10 +757,11 @@ def main():
     if rank == 0:
         print(f"✅ Model on GPU ({param_count:,} parameters)")
 
-    dataset = collect_expert_demonstrations(env, args, rank)
+    train_dataset, val_dataset = collect_expert_demonstrations(env, args, rank)
     use_cuda_graph = args.enable_cuda_graph and args.mixed_precision == "bf16" and torch.cuda.is_available()
-    dataloader, sampler = make_dataloader(dataset, args, world_size, rank, use_cuda_graph)
-    bc_training(policy, optimizer, dataloader, sampler, device, args, rank, use_cuda_graph)
+    train_loader, train_sampler = make_dataloader(train_dataset, args, world_size, rank, use_cuda_graph)
+    val_loader, val_sampler = make_dataloader(val_dataset, args, world_size, rank, False)  # No CUDA graph for validation
+    bc_training(policy, optimizer, train_loader, val_loader, train_sampler, val_sampler, device, args, rank, use_cuda_graph)
     env_runner = VectorizedEnvRunner(env_kwargs, args.rollout_envs)
     ppo_training(env_runner, policy, optimizer, device, args, rank, world_size)
 
