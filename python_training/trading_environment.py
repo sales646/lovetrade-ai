@@ -15,6 +15,7 @@ import pandas as pd
 from supabase import create_client, Client
 from datetime import datetime
 import json
+import hashlib
 from threading import Lock
 
 
@@ -122,16 +123,54 @@ class TradingEnvironment:
         symbols_key = tuple(sorted(symbols)) if symbols else tuple()
 
         if isinstance(external_data, dict):
-            try:
-                external_key = tuple(sorted(external_data.keys()))
-            except Exception:
-                external_key = id(external_data)
+            external_key = cls._fingerprint_external_data(external_data)
         elif external_data is None:
             external_key = None
         else:
             external_key = id(external_data)
 
         return (symbols_key, timeframe, augment, external_key)
+
+    @staticmethod
+    def _json_default(obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, (datetime,)):
+            return obj.isoformat()
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        return str(obj)
+
+    @classmethod
+    def _fingerprint_external_data(cls, external_data: Dict) -> str:
+        try:
+            normalized = []
+            for symbol in sorted(external_data.keys()):
+                rows = external_data[symbol]
+                if isinstance(rows, pd.DataFrame):
+                    payload = rows.to_dict("records")
+                elif isinstance(rows, dict):
+                    payload = rows
+                else:
+                    try:
+                        payload = list(rows)
+                    except TypeError:
+                        payload = rows
+
+                normalized.append((symbol, payload))
+
+            serialized = json.dumps(
+                normalized,
+                sort_keys=True,
+                default=cls._json_default
+            )
+            return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        except Exception:
+            return str(id(external_data))
 
     def _load_historical_data(self):
         """Load all available historical data"""
