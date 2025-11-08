@@ -303,6 +303,7 @@ def bc_training(
                     loss = ce_loss(logits, actions_batch)
                 if scaler.is_enabled():
                     scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
                     scaler.step(optimizer)
                     scaler.update()
@@ -423,6 +424,7 @@ def ppo_training(
 
             if scaler.is_enabled():
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
                 scaler.step(optimizer)
                 scaler.update()
