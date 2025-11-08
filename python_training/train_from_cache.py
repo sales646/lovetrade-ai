@@ -7,14 +7,17 @@ Saves all metrics and trained model to Supabase.
 import os
 import sys
 import glob
+import json
 import time
+import uuid
+import shutil
 import torch
 import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from tqdm import tqdm
@@ -34,13 +37,26 @@ class CachedDataTrainer:
     def __init__(self, cache_dir: str = ".cache_market"):
         self.cache_dir = Path(cache_dir)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+
         # Initialize Supabase
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        self.supabase: Client = create_client(supabase_url, supabase_key)
-        self.logger = SupabaseLogger()
-        
+        self.supabase: Optional[Client] = None
+        self.supabase_enabled = False
+        self.offline_metrics: List[Dict[str, Any]] = []
+        self.offline_run_dir: Optional[Path] = None
+
+        if supabase_url and supabase_key:
+            try:
+                self.supabase = create_client(supabase_url, supabase_key)
+                self.supabase_enabled = True
+            except Exception as exc:
+                print(f"⚠️  Failed to initialize Supabase client: {exc}")
+        else:
+            print("⚠️  Supabase credentials not found. Running in offline mode.")
+
+        self.logger = SupabaseLogger(enabled=self.supabase_enabled)
+
         print(f"🎯 Device: {self.device}")
         print(f"📁 Cache directory: {self.cache_dir}")
         
@@ -494,13 +510,13 @@ class CachedDataTrainer:
     
     def save_model_to_supabase(self, policy: TransformerPolicy, run_id: str,
                               metrics: Dict, symbols: List[str]) -> str:
-        """Save trained model to Supabase storage."""
-        print("\n💾 Saving model to Supabase...")
+        """Save trained model artifact."""
+        print("\n💾 Saving model artifact...")
 
         # Save model to temporary file
         model_name = f"transformer_policy_{run_id}_{int(time.time())}.pth"
         temp_path = f"/tmp/{model_name}"
-        
+
         torch.save({
             'model_state_dict': policy.state_dict(),
             'metrics': metrics,
@@ -511,36 +527,60 @@ class CachedDataTrainer:
         # Get file size
         file_size = os.path.getsize(temp_path)
         
-        # Upload to Supabase storage
-        with open(temp_path, 'rb') as f:
-            storage_path = f"models/{model_name}"
-            self.supabase.storage.from_('trained-models').upload(
-                storage_path,
-                f.read(),
-                file_options={"content-type": "application/octet-stream"}
-            )
-        
-        # Save metadata to database
-        self.supabase.table('trained_models').insert({
+        if self.supabase_enabled and self.supabase is not None:
+            # Upload to Supabase storage
+            with open(temp_path, 'rb') as f:
+                storage_path = f"models/{model_name}"
+                self.supabase.storage.from_('trained-models').upload(
+                    storage_path,
+                    f.read(),
+                    file_options={"content-type": "application/octet-stream"}
+                )
+
+            # Save metadata to database
+            self.supabase.table('trained_models').insert({
+                'run_id': run_id,
+                'model_name': model_name,
+                'model_type': 'transformer',
+                'storage_path': storage_path,
+                'file_size_bytes': file_size,
+                'performance_metrics': metrics,
+                'trained_on_symbols': symbols,
+                'final_sharpe_ratio': metrics.get('sharpe_ratio'),
+                'final_win_rate': metrics.get('win_rate'),
+                'is_best': True  # Mark as best for now
+            }).execute()
+
+            # Clean up temp file
+            os.remove(temp_path)
+
+            print(f"  ✅ Model saved to Supabase: {model_name}")
+            print(f"  ✅ Size: {file_size / 1024 / 1024:.2f} MB")
+
+            return storage_path
+
+        # Offline fallback: persist artifact locally
+        if self.offline_run_dir is None:
+            self.offline_run_dir = Path("offline_runs") / run_id
+            self.offline_run_dir.mkdir(parents=True, exist_ok=True)
+
+        local_dir = self.offline_run_dir / "artifacts"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        destination = local_dir / model_name
+        shutil.move(temp_path, destination)
+        manifest = {
             'run_id': run_id,
             'model_name': model_name,
-            'model_type': 'transformer',
-            'storage_path': storage_path,
             'file_size_bytes': file_size,
-            'performance_metrics': metrics,
-            'trained_on_symbols': symbols,
-            'final_sharpe_ratio': metrics.get('sharpe_ratio'),
-            'final_win_rate': metrics.get('win_rate'),
-            'is_best': True  # Mark as best for now
-        }).execute()
-        
-        # Clean up temp file
-        os.remove(temp_path)
-        
-        print(f"  ✅ Model saved: {model_name}")
-        print(f"  ✅ Size: {file_size / 1024 / 1024:.2f} MB")
+            'metrics': metrics,
+            'symbols': symbols,
+            'saved_at': datetime.now().isoformat()
+        }
+        with open(local_dir / "model_metadata.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, default=str)
 
-        return storage_path
+        print(f"  ⚠️  Supabase disabled — model saved locally to {destination}")
+        return str(destination)
 
     def maybe_run_bc_pretraining(self, policy: TransformerPolicy,
                                  data: Dict[str, pd.DataFrame],
@@ -587,7 +627,12 @@ class CachedDataTrainer:
             policy.to(self.device)
             policy.eval()
 
-        if run_id is not None and metrics is not None:
+        if (
+            run_id is not None
+            and metrics is not None
+            and self.supabase_enabled
+            and self.supabase is not None
+        ):
             self.supabase.table('training_metrics').insert({
                 'run_id': run_id,
                 'epoch': 0,
@@ -624,8 +669,7 @@ class CachedDataTrainer:
         policy = self.initialize_policy(train_envs[0])
         optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
 
-        # Create training run in Supabase
-        run_response = self.supabase.table('training_runs').insert({
+        run_config = {
             'run_name': f'cached_training_{int(time.time())}',
             'phase': 'training',
             'status': 'running',
@@ -641,9 +685,21 @@ class CachedDataTrainer:
                 'train_envs': len(train_envs),
                 'val_envs': len(val_envs)
             }
-        }).execute()
+        }
 
-        run_id = run_response.data[0]['id']
+        if self.supabase_enabled and self.supabase is not None:
+            run_response = self.supabase.table('training_runs').insert(run_config).execute()
+            run_record = run_response.data[0]
+            run_id = run_record['id']
+        else:
+            run_id = f"offline-{uuid.uuid4()}"
+            run_record = {**run_config, 'id': run_id}
+            self.offline_run_dir = Path("offline_runs") / run_id
+            self.offline_run_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.offline_run_dir / "run_config.json", "w", encoding="utf-8") as f:
+                json.dump(run_record, f, indent=2, default=str)
+            print("⚠️  Supabase disabled — logging run data locally.")
+
         print(f"\n🚀 Training run ID: {run_id}")
 
         bc_metrics = self.maybe_run_bc_pretraining(policy, data, run_id)
@@ -677,7 +733,7 @@ class CachedDataTrainer:
             epoch_time = time.time() - epoch_start
 
             # Log metrics to Supabase
-            self.supabase.table('training_metrics').insert({
+            metric_payload = {
                 'run_id': run_id,
                 'epoch': epoch,
                 'split': 'train',
@@ -688,7 +744,12 @@ class CachedDataTrainer:
                 'value_loss': update_metrics['value_loss'],
                 'entropy': update_metrics['entropy'],
                 'approx_kl': update_metrics['approx_kl']
-            }).execute()
+            }
+
+            if self.supabase_enabled and self.supabase is not None:
+                self.supabase.table('training_metrics').insert(metric_payload).execute()
+            else:
+                self.offline_metrics.append(metric_payload)
 
             # Print progress
             print(f"\nEpoch {epoch + 1}/{num_epochs} ({epoch_time:.1f}s)")
@@ -724,20 +785,42 @@ class CachedDataTrainer:
         
         # Update training run status
         total_time = time.time() - start_time
-        self.supabase.table('training_runs').update({
-            'status': 'completed',
-            'completed_at': datetime.now().isoformat(),
-            'best_val_sharpe': best_sharpe,
-            'best_checkpoint_path': model_path,
-            'config': {
-                **run_response.data[0]['config'],
-                'training_duration_seconds': int(total_time),
-                'final_test_metrics': test_metrics
+        if self.supabase_enabled and self.supabase is not None:
+            self.supabase.table('training_runs').update({
+                'status': 'completed',
+                'completed_at': datetime.now().isoformat(),
+                'best_val_sharpe': best_sharpe,
+                'best_checkpoint_path': model_path,
+                'config': {
+                    **run_record['config'],
+                    'training_duration_seconds': int(total_time),
+                    'final_test_metrics': test_metrics
+                }
+            }).eq('id', run_id).execute()
+        else:
+            if self.offline_run_dir is None:
+                self.offline_run_dir = Path("offline_runs") / run_id
+                self.offline_run_dir.mkdir(parents=True, exist_ok=True)
+            summary_path = self.offline_run_dir / "run_summary.json"
+            summary_payload = {
+                'status': 'completed',
+                'completed_at': datetime.now().isoformat(),
+                'best_val_sharpe': best_sharpe,
+                'best_checkpoint_path': model_path,
+                'config': {
+                    **run_record['config'],
+                    'training_duration_seconds': int(total_time),
+                    'final_test_metrics': test_metrics
+                }
             }
-        }).eq('id', run_id).execute()
-        
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary_payload, f, indent=2, default=str)
+            metrics_path = self.offline_run_dir / "training_metrics.json"
+            with open(metrics_path, "w", encoding="utf-8") as f:
+                json.dump(self.offline_metrics, f, indent=2, default=str)
+
         print(f"\n✅ Training complete! Total time: {total_time/60:.1f} minutes")
-        print(f"✅ Model saved to Supabase: {model_path}")
+        print(f"✅ Model saved to: {model_path}")
         print(f"✅ Run ID: {run_id}")
 
 
