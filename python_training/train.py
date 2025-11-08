@@ -77,6 +77,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable Supabase logging even if credentials are present",
     )
+    parser.add_argument(
+        "--allow-synthetic-data",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Permit deterministic synthetic market data when S3 credentials are missing. "
+            "Disable this flag to require real Polygon S3 data during production runs."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -225,10 +234,13 @@ def load_data(rank: int, args: argparse.Namespace):
         print("\n[STEP 2/6] Loading Data from S3")
     from s3_data_loader import S3DataLoader
 
-    loader = S3DataLoader()
+    loader = S3DataLoader(allow_synthetic=args.allow_synthetic_data)
 
     if rank == 0:
         print("   Discovering symbols...")
+
+        if not args.allow_synthetic_data:
+            print("   Synthetic data disabled; S3 credentials must be configured.")
 
     discovery_limit = max(args.symbol_limit * 2, args.symbol_limit + 50)
     symbols = loader.discover_all_symbols(max_symbols=discovery_limit)
