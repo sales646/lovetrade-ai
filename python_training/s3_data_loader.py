@@ -14,6 +14,11 @@ import gzip
 import io
 import numpy as np
 import pandas as pd
+
+try:  # Optional dependency for nicer CLI feedback
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - fallback for minimal installs
+    tqdm = None
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
@@ -113,15 +118,40 @@ class S3MarketDataLoader:
         combined = combined.sort_values(['ticker', 'timestamp'])
         
         print(f"✅ Loaded {len(combined):,} total rows")
-        print(f"✅ Unique symbols: {combined['ticker'].nunique()}")
-        
-        # Split by symbol
+        unique_symbols = combined['ticker'].nunique()
+        print(f"✅ Unique symbols: {unique_symbols}")
+
+        # Split by symbol with progress feedback
+        print("   🔄 Preparing per-symbol data (this may take a minute)...")
         symbol_data = {}
-        for symbol in combined['ticker'].unique():
-            symbol_df = combined[combined['ticker'] == symbol].copy()
-            symbol_df = symbol_df.sort_values('timestamp').reset_index(drop=True)
-            symbol_data[symbol] = symbol_df
-        
+        symbols = combined['ticker'].unique()
+
+        total_symbols = len(symbols)
+
+        if tqdm is None:
+            # Provide lightweight textual progress feedback when tqdm is unavailable.
+            # ``groupby`` yields (symbol, frame) pairs without allocating all groups
+            # at once, so we stream the updates while emitting periodic checkpoints.
+            checkpoint = max(1, total_symbols // 50)  # ~2% increments
+            for idx, (symbol, symbol_df) in enumerate(combined.groupby('ticker'), start=1):
+                symbol_df = symbol_df.sort_values('timestamp').reset_index(drop=True)
+                symbol_data[symbol] = symbol_df
+
+                if idx % checkpoint == 0 or idx == total_symbols:
+                    print(f"   • Prepared {idx:,}/{total_symbols:,} symbols", end="\r")
+
+            # Terminate the carriage-returned progress line and emit a final summary.
+            print()
+            print(f"   ✅ Prepared per-symbol data for {total_symbols:,} symbols")
+        else:
+            with tqdm(total=total_symbols, desc="   Symbols", unit="symbol", leave=False) as pbar:
+                for symbol, symbol_df in combined.groupby('ticker'):
+                    symbol_df = symbol_df.sort_values('timestamp').reset_index(drop=True)
+                    symbol_data[symbol] = symbol_df
+                    pbar.update(1)
+
+            print(f"   ✅ Prepared per-symbol data for {total_symbols:,} symbols")
+
         return symbol_data
     
     def get_random_symbols(self, 
