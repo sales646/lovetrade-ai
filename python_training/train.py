@@ -299,7 +299,14 @@ class SimplePolicy(nn.Module):
         self.checkpoint_splits = max(1, checkpoint_splits)
 
     def forward_features(self, x):
-        return checkpoint_sequential(list(self.feature_layers), self.checkpoint_splits, x)
+        if self.checkpoint_splits <= 1 or not x.requires_grad:
+            for layer in self.feature_layers:
+                x = layer(x)
+            return x
+
+        return checkpoint_sequential(
+            list(self.feature_layers), self.checkpoint_splits, x, use_reentrant=False
+        )
 
     def forward(self, x):
         features = self.forward_features(x)
