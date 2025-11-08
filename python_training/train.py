@@ -474,7 +474,7 @@ def bc_training(
 ):
     ce_loss = nn.CrossEntropyLoss()
     mp_dtype = torch.bfloat16 if args.mixed_precision == "bf16" else torch.float16
-    scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision == "fp16")
+    scaler = torch.amp.GradScaler("cuda", enabled=args.mixed_precision == "fp16")
 
     bc_graph = torch.cuda.CUDAGraph() if use_cuda_graph else None
     static_states = static_actions = None
@@ -532,7 +532,7 @@ def bc_training(
                     loss = ce_loss(logits, actions_batch)
             else:
                 optimizer.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast(dtype=mp_dtype):
+                with torch.amp.autocast("cuda", dtype=mp_dtype):
                     logits, _ = policy(states_batch)
                     loss = ce_loss(logits, actions_batch)
                 if scaler.is_enabled():
@@ -697,7 +697,7 @@ def collect_rollout(env_runner, policy, steps: int, device: torch.device, mp_dty
         else:
             state_tensor = torch.as_tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
 
-        with torch.no_grad(), torch.cuda.amp.autocast(dtype=mp_dtype):
+        with torch.no_grad(), torch.amp.autocast("cuda", dtype=mp_dtype):
             logits, _ = policy(state_tensor)
             probs = torch.softmax(logits, dim=-1)
             sampled_actions = torch.multinomial(probs, 1).squeeze(1)
@@ -744,7 +744,7 @@ def ppo_training(
         print("-" * 70)
 
     mp_dtype = torch.bfloat16 if args.mixed_precision == "bf16" else torch.float16
-    scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision == "fp16")
+    scaler = torch.amp.GradScaler("cuda", enabled=args.mixed_precision == "fp16")
     best_reward = torch.tensor(float("-inf"), device=device)
     
     # Initialize early stopping for PPO
@@ -805,7 +805,7 @@ def ppo_training(
             rewards = rewards_cpu.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(dtype=mp_dtype):
+            with torch.amp.autocast("cuda", dtype=mp_dtype):
                 logits, values = policy(states)
                 values = values.squeeze(-1)
 
