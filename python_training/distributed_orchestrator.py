@@ -63,45 +63,37 @@ class DistributedRLOrchestrator:
         print("\n🚀 PNU Training System Setup")
         print("="*70)
         
+        data_loaded_from_cache = False
         if self.use_cache:
             print("📦 Loading market data from local cache...")
             from train_from_cache import CachedDataTrainer
 
             cache_dir = Path(self.config.get('cache_dir', ".cache_market"))
             cached_data = CachedDataTrainer(cache_dir).load_cached_data() or {}
-            self.external_data = cached_data
-            self.config['symbols'] = list(cached_data.keys())
-            print(f"✅ Loaded {len(self.config['symbols'])} symbols from cache")
-        else:
-            # Use ProductionDataFetcher for real market data
-            print("📥 Fetching REAL market data (Polygon S3 + Binance + Yahoo)...")
-            from production_data_fetcher import ProductionDataFetcher
-            from datetime import datetime, timedelta
 
-            # Yahoo Finance 1-minute data is limited to 7 days
-            # For longer ranges, Polygon S3 and Binance provide historical data
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=7)  # Last 7 days for Yahoo 1-min data
+            valid_cached_data = {}
+            for symbol, data in cached_data.items():
+                try:
+                    if len(data) > 0:
+                        valid_cached_data[symbol] = data
+                except TypeError:
+                    # Fallback for objects without len support – assume usable
+                    valid_cached_data[symbol] = data
 
-            fetcher = ProductionDataFetcher(
-                start_date=start_date.strftime("%Y-%m-%d"),
-                end_date=end_date.strftime("%Y-%m-%d")
-            )
+            if valid_cached_data:
+                self.external_data = valid_cached_data
+                self.config['symbols'] = list(valid_cached_data.keys())
+                data_loaded_from_cache = True
+                print(f"✅ Loaded {len(self.config['symbols'])} symbols from cache")
+            else:
+                print("⚠️ Cache is empty or invalid. Falling back to live data fetch.")
+                self.use_cache = False
+                self.config['use_cache'] = False
+                self.external_data = None
 
-            market_data, news_data = fetcher.fetch_all()
+        if not data_loaded_from_cache:
+            self.config['symbols'] = self._load_market_data_online()
 
-            # Filter symbols with enough bars (min 1000)
-            min_bars = 1000
-            valid_symbols = [s for s, df in market_data.items() if len(df) >= min_bars]
-
-            # Store data in Supabase for training
-            print(f"💾 Storing {len(valid_symbols)} symbols to Supabase...")
-            self._store_data_to_supabase(market_data, news_data, valid_symbols)
-
-            self.config['symbols'] = valid_symbols
-            print(f"✅ Ready with {len(valid_symbols)} symbols")
-            print(f"   Data range: {start_date.date()} to {end_date.date()}")
-        
         # GPU setup
         gpu_info = check_gpu_availability()
         if gpu_info['available']:
@@ -136,6 +128,39 @@ class DistributedRLOrchestrator:
             self.pbt_scheduler.initialize_population(base_hyperparams)
         
         print("✅ Setup complete\n")
+
+    def _load_market_data_online(self):
+        """Fetch market data from remote sources and store to Supabase."""
+        print("📥 Fetching REAL market data (Polygon S3 + Binance + Yahoo)...")
+        from production_data_fetcher import ProductionDataFetcher
+        from datetime import datetime, timedelta
+
+        # Yahoo Finance 1-minute data is limited to 7 days
+        # For longer ranges, Polygon S3 and Binance provide historical data
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=7)  # Last 7 days for Yahoo 1-min data
+
+        fetcher = ProductionDataFetcher(
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d")
+        )
+
+        market_data, news_data = fetcher.fetch_all()
+
+        # Filter symbols with enough bars (min 1000)
+        min_bars = 1000
+        valid_symbols = [s for s, df in market_data.items() if len(df) >= min_bars]
+
+        if not valid_symbols:
+            raise RuntimeError("No valid symbols retrieved from live data sources.")
+
+        # Store data in Supabase for training
+        print(f"💾 Storing {len(valid_symbols)} symbols to Supabase...")
+        self._store_data_to_supabase(market_data, news_data, valid_symbols)
+
+        print(f"✅ Ready with {len(valid_symbols)} symbols")
+        print(f"   Data range: {start_date.date()} to {end_date.date()}")
+        return valid_symbols
     
     def _store_data_to_supabase(self, market_data, news_data, valid_symbols):
         """Store fetched data to Supabase historical_bars"""
