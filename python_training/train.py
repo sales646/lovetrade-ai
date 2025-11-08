@@ -5,6 +5,8 @@ import argparse
 import os
 from typing import Optional, Tuple
 
+from supabase_logger import SupabaseLogger
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -19,9 +21,9 @@ from progress import PhaseProgress
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimized GPU training")
-    parser.add_argument("--epochs", type=int, default=150, help="Number of PPO epochs")
-    parser.add_argument("--bc-epochs", type=int, default=40, help="Number of BC epochs")
-    parser.add_argument("--bc-episodes", type=int, default=400, help="Expert episodes for BC pretraining")
+    parser.add_argument("--epochs", type=int, default=7500, help="Number of PPO epochs")
+    parser.add_argument("--bc-epochs", type=int, default=2000, help="Number of BC epochs")
+    parser.add_argument("--bc-episodes", type=int, default=20000, help="Expert episodes for BC pretraining")
     parser.add_argument("--bc-steps", type=int, default=256, help="Steps per expert episode")
     parser.add_argument("--bc-batch-size", type=int, default=8192, help="Global BC batch size")
     parser.add_argument("--bc-workers", type=int, default=0, help="Data loader workers for BC stage")
@@ -35,21 +37,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-splits", type=int, default=3, help="Gradient checkpoint partitions")
     parser.add_argument(
         "--data-start",
-        default="2023-10-01",
+        default="2010-01-01",
         help="Historical data start date (YYYY-MM-DD)",
     )
     parser.add_argument(
         "--data-end",
-        default="2024-03-31",
+        default="2024-12-31",
         help="Historical data end date (YYYY-MM-DD)",
     )
     parser.add_argument(
         "--symbol-limit",
         type=int,
-        default=150,
+        default=7500,
         help="Maximum number of symbols to include in training",
     )
     parser.add_argument("--enable-cuda-graph", action="store_true", help="Capture CUDA graph for BC training")
+
+    parser.add_argument(
+        "--repeat-trainings",
+        type=int,
+        default=3,
+        help="Number of end-to-end training cycles to run sequentially",
+    )
     
     # Early stopping arguments
     parser.add_argument("--early-stopping-patience", type=int, default=10, help="Early stopping patience")
@@ -57,7 +66,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-early-stopping", action="store_true", help="Disable early stopping")
     parser.add_argument("--min-delta", type=float, default=0.001, help="Minimum improvement for early stopping")
     parser.add_argument("--top-k-checkpoints", type=int, default=3, help="Keep top K checkpoints")
-    
+    parser.add_argument(
+        "--supabase-log-interval",
+        type=int,
+        default=10,
+        help="Epoch interval for logging metrics to Supabase",
+    )
+    parser.add_argument(
+        "--disable-supabase-logging",
+        action="store_true",
+        help="Disable Supabase logging even if credentials are present",
+    )
+
     return parser.parse_args()
 
 
@@ -447,6 +467,10 @@ def bc_training(
     args: argparse.Namespace,
     rank: int,
     use_cuda_graph: bool,
+    world_size: int,
+    supabase_logger: Optional[SupabaseLogger],
+    cycle_index: int,
+    log_interval: int,
 ):
     ce_loss = nn.CrossEntropyLoss()
     mp_dtype = torch.bfloat16 if args.mixed_precision == "bf16" else torch.float16
@@ -470,6 +494,8 @@ def bc_training(
         print("   Training on demonstrations...")
         if early_stopping:
             print(f"   Early stopping enabled (patience={args.early_stopping_patience})")
+
+    best_val_acc = float("-inf")
 
     for epoch in range(args.bc_epochs):
         # Training phase
@@ -527,13 +553,100 @@ def bc_training(
             running_acc += acc.detach()
             count += 1
 
-        if rank == 0 and (epoch + 1) % 5 == 0:
-            avg_loss = running_loss / count
-            avg_acc = running_acc / count
-            print(f"   Epoch {epoch + 1}/{args.bc_epochs} | Loss: {avg_loss.item():.4f} | Acc: {avg_acc.item():.2%}")
+        avg_loss = running_loss / max(1, count)
+        avg_acc = running_acc / max(1, count)
+
+        # Validation phase
+        policy.eval()
+        val_loss = 0.0
+        val_acc = 0.0
+        val_count = 0
+
+        with torch.no_grad():
+            for val_states, val_actions in val_loader:
+                val_states = val_states.to(device, non_blocking=True)
+                val_actions = val_actions.to(device, non_blocking=True)
+                logits, _ = policy(val_states)
+                loss = ce_loss(logits, val_actions)
+                preds = torch.argmax(logits, dim=1)
+                acc = (preds == val_actions).float().mean()
+
+                val_loss += loss.detach()
+                val_acc += acc.detach()
+                val_count += 1
+
+        avg_val_loss = val_loss / max(1, val_count)
+        avg_val_acc = val_acc / max(1, val_count)
+
+        if rank == 0 and ((epoch + 1) % 5 == 0 or epoch + 1 == args.bc_epochs):
+            print(
+                "   Epoch {}/{} | Loss: {:.4f} | Acc: {:.2%} | Val Loss: {:.4f} | Val Acc: {:.2%}".format(
+                    epoch + 1,
+                    args.bc_epochs,
+                    avg_loss.item(),
+                    avg_acc.item(),
+                    avg_val_loss.item(),
+                    avg_val_acc.item(),
+                )
+            )
+
+        if supabase_logger and rank == 0 and (
+            (epoch + 1) % max(1, log_interval) == 0 or epoch + 1 == args.bc_epochs
+        ):
+            supabase_logger.log_metrics(
+                "bc_train",
+                step=epoch + 1,
+                metrics={
+                    "cycle": cycle_index + 1,
+                    "loss": float(avg_loss.item()),
+                    "accuracy": float(avg_acc.item()),
+                },
+            )
+            supabase_logger.log_metrics(
+                "bc_val",
+                step=epoch + 1,
+                metrics={
+                    "cycle": cycle_index + 1,
+                    "loss": float(avg_val_loss.item()),
+                    "accuracy": float(avg_val_acc.item()),
+                },
+            )
+
+        stop_training = False
+
+        if avg_val_acc.item() > best_val_acc:
+            best_val_acc = avg_val_acc.item()
+
+        if early_stopping and rank == 0:
+            checkpoint_path = f"checkpoints/bc_cycle{cycle_index + 1}_epoch{epoch + 1}.pt"
+            should_stop = early_stopping(
+                epoch=epoch,
+                val_metric=avg_val_acc.item(),
+                train_metric=avg_acc.item(),
+                checkpoint_path=checkpoint_path,
+            )
+
+            if early_stopping.counter == 0:
+                os.makedirs("checkpoints", exist_ok=True)
+                torch.save(get_policy_state_dict(policy), checkpoint_path)
+
+            if should_stop:
+                print(f"   🛑 Early stopping triggered at epoch {epoch + 1}")
+                print(f"   {early_stopping.get_summary()}")
+                stop_training = True
+
+        if world_size > 1:
+            stop_tensor = torch.tensor(1 if stop_training else 0, device=device)
+            dist.broadcast(stop_tensor, src=0)
+            stop_training = bool(stop_tensor.item())
+
+        if stop_training:
+            break
 
     if rank == 0:
         print("✅ BC pretraining complete")
+
+    return best_val_acc
 
 
 class VectorizedEnvRunner:
@@ -621,6 +734,9 @@ def ppo_training(
     args: argparse.Namespace,
     rank: int,
     world_size: int,
+    supabase_logger: Optional[SupabaseLogger],
+    cycle_index: int,
+    log_interval: int,
 ):
     if rank == 0:
         print("\n[STEP 6/6] PPO Reinforcement Learning")
@@ -726,29 +842,54 @@ def ppo_training(
             best_reward = avg_reward
             if rank == 0:
                 os.makedirs("checkpoints", exist_ok=True)
+                torch.save(
+                    get_policy_state_dict(policy),
+                    f"checkpoints/best_policy_cycle{cycle_index + 1}.pt",
+                )
                 torch.save(get_policy_state_dict(policy), "checkpoints/best_policy.pt")
+
+        if supabase_logger and rank == 0 and (
+            (epoch + 1) % max(1, log_interval) == 0 or epoch + 1 == args.epochs
+        ):
+            supabase_logger.log_metrics(
+                "ppo",
+                step=epoch + 1,
+                metrics={
+                    "cycle": cycle_index + 1,
+                    "avg_reward": float(avg_reward.item()),
+                },
+            )
 
         if rank == 0 and (epoch % 5 == 0 or epoch == args.epochs - 1):
             print(f"Epoch {epoch + 1:3d}/{args.epochs} | Reward: {avg_reward.item():7.4f}")
-        
+
         # Early stopping check for PPO
+        stop_training = False
         if early_stopping and rank == 0:
-            checkpoint_path = f"checkpoints/ppo_epoch_{epoch+1}.pt"
-            
+            checkpoint_path = f"checkpoints/ppo_cycle{cycle_index + 1}_epoch_{epoch + 1}.pt"
+
             should_stop = early_stopping(
                 epoch=epoch,
                 val_metric=avg_reward.item(),
                 checkpoint_path=checkpoint_path
             )
-            
+
             if early_stopping.counter == 0:  # New best model
                 torch.save(get_policy_state_dict(policy), checkpoint_path)
                 print(f"   ✓ New best reward: {avg_reward.item():.4f}")
-            
+
             if should_stop:
                 print(f"   🛑 Early stopping triggered at epoch {epoch+1}")
                 print(f"   {early_stopping.get_summary()}")
-                break
+                stop_training = True
+
+        if world_size > 1:
+            stop_tensor = torch.tensor(1 if stop_training else 0, device=device)
+            dist.broadcast(stop_tensor, src=0)
+            stop_training = bool(stop_tensor.item())
+
+        if stop_training:
+            break
 
     if rank == 0:
         print("\n" + "=" * 70)
@@ -760,6 +901,8 @@ def ppo_training(
         print("1. Check training dashboard for results")
         print("2. Increase epochs and data range for better performance")
         print("3. Add more symbols and longer time periods")
+
+    return best_reward.item()
 
 
 def cleanup_distributed(enabled: bool):
@@ -786,13 +929,104 @@ def main():
     if rank == 0:
         print(f"✅ Model on GPU ({param_count:,} parameters)")
 
-    train_dataset, val_dataset = collect_expert_demonstrations(env, args, rank)
-    use_cuda_graph = args.enable_cuda_graph and args.mixed_precision == "bf16" and torch.cuda.is_available()
-    train_loader, train_sampler = make_dataloader(train_dataset, args, world_size, rank, use_cuda_graph)
-    val_loader, val_sampler = make_dataloader(val_dataset, args, world_size, rank, False)  # No CUDA graph for validation
-    bc_training(policy, optimizer, train_loader, val_loader, train_sampler, val_sampler, device, args, rank, use_cuda_graph)
-    env_runner = VectorizedEnvRunner(env_kwargs, args.rollout_envs)
-    ppo_training(env_runner, policy, optimizer, device, args, rank, world_size)
+    supabase_logger = SupabaseLogger(enabled=(rank == 0 and not args.disable_supabase_logging))
+    supabase_enabled = getattr(supabase_logger, "_enabled", False)
+    run_status = "completed"
+    run_id = None
+
+    if supabase_enabled:
+        run_config = {
+            "epochs": args.epochs,
+            "bc_epochs": args.bc_epochs,
+            "symbol_limit": args.symbol_limit,
+            "repeat_trainings": args.repeat_trainings,
+            "data_start": args.data_start,
+            "data_end": args.data_end,
+            "symbols_loaded": len(symbols),
+        }
+        run_id = supabase_logger.start_run(run_config)
+        if rank == 0:
+            print(f"✅ Supabase logging enabled (run_id: {run_id})")
+    elif rank == 0:
+        print("⚠️  Supabase logging disabled (missing credentials or --disable-supabase-logging)")
+
+    try:
+        for cycle_index in range(max(1, args.repeat_trainings)):
+            if rank == 0:
+                print(
+                    f"\n🔁 Training cycle {cycle_index + 1}/{max(1, args.repeat_trainings)}"
+                )
+
+            train_dataset, val_dataset = collect_expert_demonstrations(env, args, rank)
+            use_cuda_graph = (
+                args.enable_cuda_graph
+                and args.mixed_precision == "bf16"
+                and torch.cuda.is_available()
+            )
+            train_loader, train_sampler = make_dataloader(
+                train_dataset, args, world_size, rank, use_cuda_graph
+            )
+            val_loader, val_sampler = make_dataloader(
+                val_dataset, args, world_size, rank, False
+            )
+            best_val_acc = bc_training(
+                policy,
+                optimizer,
+                train_loader,
+                val_loader,
+                train_sampler,
+                val_sampler,
+                device,
+                args,
+                rank,
+                use_cuda_graph,
+                world_size,
+                supabase_logger if supabase_enabled else None,
+                cycle_index,
+                args.supabase_log_interval,
+            )
+
+            if supabase_enabled and rank == 0:
+                supabase_logger.log_metrics(
+                    "bc_summary",
+                    step=cycle_index + 1,
+                    metrics={
+                        "cycle": cycle_index + 1,
+                        "best_val_acc": float(best_val_acc),
+                    },
+                )
+
+            env_runner = VectorizedEnvRunner(env_kwargs, args.rollout_envs)
+            best_reward = ppo_training(
+                env_runner,
+                policy,
+                optimizer,
+                device,
+                args,
+                rank,
+                world_size,
+                supabase_logger if supabase_enabled else None,
+                cycle_index,
+                args.supabase_log_interval,
+            )
+
+            if supabase_enabled and rank == 0:
+                supabase_logger.log_metrics(
+                    "ppo_summary",
+                    step=cycle_index + 1,
+                    metrics={
+                        "cycle": cycle_index + 1,
+                        "best_avg_reward": float(best_reward),
+                    },
+                )
+
+    except Exception:
+        run_status = "failed"
+        raise
+    finally:
+        if supabase_enabled:
+            supabase_logger.finalize_run(run_status)
+            supabase_logger.close()
 
     progress.close_all()
     cleanup_distributed(distributed_enabled)
