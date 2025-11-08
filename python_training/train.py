@@ -3,6 +3,7 @@
 
 import argparse
 import os
+from datetime import datetime
 from typing import Optional, Tuple
 
 from supabase_logger import SupabaseLogger
@@ -954,7 +955,11 @@ def main():
     run_id = None
 
     if supabase_enabled:
+        run_name = f"{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{len(symbols)}-symbols"
         run_config = {
+            "run_name": run_name,
+            "phase": "initializing",
+            "status": "running",
             "epochs": args.epochs,
             "bc_epochs": args.bc_epochs,
             "symbol_limit": args.symbol_limit,
