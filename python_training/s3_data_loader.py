@@ -126,35 +126,16 @@ class S3MarketDataLoader:
         symbol_data = {}
         symbols = combined['ticker'].unique()
 
-        total_symbols = len(symbols)
-
         if tqdm is None:
-            # Provide lightweight textual progress feedback when tqdm is unavailable.
-            # ``groupby`` yields (symbol, frame) pairs without allocating all groups
-            # at once, so we stream the updates while emitting periodic checkpoints.
-            checkpoint = max(1, total_symbols // 50)  # ~2% increments
-            for idx, (symbol, symbol_df) in enumerate(combined.groupby('ticker'), start=1):
+            for symbol, symbol_df in combined.groupby('ticker'):
                 symbol_df = symbol_df.sort_values('timestamp').reset_index(drop=True)
                 symbol_data[symbol] = symbol_df
-
-                if idx % checkpoint == 0 or idx == total_symbols:
-                    print(
-                        f"   • Prepared {idx:,}/{total_symbols:,} symbols",
-                        end="\r",
-                        flush=True,
-                    )
-
-            # Terminate the carriage-returned progress line and emit a final summary.
-            print()
-            print(f"   ✅ Prepared per-symbol data for {total_symbols:,} symbols")
         else:
-            with tqdm(total=total_symbols, desc="   Symbols", unit="symbol", leave=False) as pbar:
+            with tqdm(total=len(symbols), desc="   Symbols", unit="symbol", leave=False) as pbar:
                 for symbol, symbol_df in combined.groupby('ticker'):
                     symbol_df = symbol_df.sort_values('timestamp').reset_index(drop=True)
                     symbol_data[symbol] = symbol_df
                     pbar.update(1)
-
-            print(f"   ✅ Prepared per-symbol data for {total_symbols:,} symbols")
 
         return symbol_data
     
