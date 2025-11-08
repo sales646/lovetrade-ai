@@ -20,9 +20,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimized GPU training")
     parser.add_argument("--epochs", type=int, default=50, help="Number of PPO epochs")
     parser.add_argument("--bc-epochs", type=int, default=20, help="Number of BC epochs")
+    parser.add_argument("--bc-episodes", type=int, default=400, help="Expert episodes for BC pretraining")
+    parser.add_argument("--bc-steps", type=int, default=256, help="Steps per expert episode")
     parser.add_argument("--bc-batch-size", type=int, default=8192, help="Global BC batch size")
+    parser.add_argument("--bc-workers", type=int, default=0, help="Data loader workers for BC stage")
     parser.add_argument("--ppo-rollout-steps", type=int, default=2048, help="Rollout steps per epoch")
     parser.add_argument("--ppo-mini-batch", type=int, default=512, help="Mini-batch size for PPO updates")
+    parser.add_argument("--ppo-workers", type=int, default=0, help="Data loader workers for PPO stage")
+    parser.add_argument("--rollout-envs", type=int, default=8, help="Vectorized environments for PPO rollouts")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--mixed-precision", choices=["bf16", "fp16"], default="bf16")
     parser.add_argument("--compile-mode", default="reduce-overhead", help="torch.compile mode")
@@ -86,28 +91,30 @@ def load_data(rank: int):
 
     if rank == 0:
         print("   Loading market data (January 2024)...")
-    df = loader.load_multi_day_data(
+    data_map = loader.load_multi_day_data(
         start_date="2024-01-01",
         end_date="2024-01-31",
         symbols=symbols[:100],  # Use first 100 symbols
     )
     if rank == 0:
-        print(f"✅ Loaded {len(df):,} rows")
+        total_rows = sum(len(rows) for rows in data_map.values())
+        print(f"✅ Loaded {total_rows:,} rows across {len(data_map)} symbols")
 
-    return loader, df, symbols
+    return loader, data_map, symbols
 
 # ====================
 # STEP 3: Environment
 # ====================
-def create_environment(df, symbols, rank: int):
+def create_environment(data_map, symbols, rank: int):
     if rank == 0:
         print("\n[STEP 3/6] Creating Trading Environment")
     from trading_environment import TradingEnvironment
 
-    env = TradingEnvironment(df, symbols=symbols[:100])
+    env_kwargs = dict(symbols=symbols[:100], external_data=data_map, enable_multi_market=True)
+    env = TradingEnvironment(**env_kwargs)
     if rank == 0:
         print("✅ Environment ready")
-    return env
+    return env, env_kwargs
 
 # ====================
 # STEP 4: Neural Network
@@ -177,15 +184,15 @@ def get_policy_state_dict(policy) -> dict:
     return module.state_dict()
 
 
-def collect_expert_demonstrations(env, rank: int):
+def collect_expert_demonstrations(env, args: argparse.Namespace, rank: int):
     if rank == 0:
         print("\n[STEP 5/6] Behavior Cloning (BC) Pretraining")
         print("   Collecting expert demonstrations...")
 
     states, actions = [], []
-    for _ in range(100):  # 100 episodes
+    for _ in range(args.bc_episodes):
         state = env.reset()
-        for _ in range(50):  # 50 steps each
+        for _ in range(args.bc_steps):
             price_change = state[1]  # Assume this is price change
             if price_change > 0.01:
                 action = 2  # Buy
@@ -226,7 +233,12 @@ def make_dataloader(
         sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False)
 
     effective_batch = max(1, args.bc_batch_size // world_size)
-    num_workers = 4 if len(dataset) >= 4 else 0
+    if args.bc_workers > 0:
+        num_workers = args.bc_workers
+    else:
+        num_workers = min(8, os.cpu_count() or 1)
+        if len(dataset) < num_workers:
+            num_workers = 0
 
     loader_kwargs = dict(
         batch_size=effective_batch,
@@ -328,37 +340,85 @@ def bc_training(
         print("✅ BC pretraining complete")
 
 
-def collect_rollout(env, policy, steps: int, device: torch.device, mp_dtype, rank: int):
+class VectorizedEnvRunner:
+    def __init__(self, env_kwargs: dict, num_envs: int):
+        from trading_environment import TradingEnvironment
+
+        self.num_envs = max(1, num_envs)
+        self.envs = [TradingEnvironment(**env_kwargs) for _ in range(self.num_envs)]
+        self.current_states: Optional[np.ndarray] = None
+
+    def reset(self) -> np.ndarray:
+        self.current_states = np.stack([env.reset() for env in self.envs])
+        return self.current_states
+
+    def step(self, actions: np.ndarray):
+        next_states = []
+        rewards = []
+        dones = []
+        infos = []
+
+        for env, action in zip(self.envs, actions):
+            next_state, reward, done, info = env.step(int(action))
+            if done:
+                next_state = env.reset()
+            next_states.append(next_state)
+            rewards.append(reward)
+            dones.append(done)
+            infos.append(info)
+
+        self.current_states = np.stack(next_states)
+        return self.current_states, np.asarray(rewards, dtype=np.float32), np.asarray(dones), infos
+
+
+def collect_rollout(env_runner, policy, steps: int, device: torch.device, mp_dtype, rank: int):
     states_list, actions_list, rewards_list = [], [], []
 
-    state = env.reset()
-    for _ in range(steps):
-        state_tensor = torch.as_tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+    if isinstance(env_runner, VectorizedEnvRunner):
+        states = env_runner.reset() if env_runner.current_states is None else env_runner.current_states
+        batch_size = env_runner.num_envs
+    else:
+        state = env_runner.reset()
+        batch_size = 1
+
+    collected = 0
+    while collected < steps:
+        if isinstance(env_runner, VectorizedEnvRunner):
+            state_tensor = torch.as_tensor(states, dtype=torch.float32, device=device)
+        else:
+            state_tensor = torch.as_tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=mp_dtype):
             logits, _ = policy(state_tensor)
             probs = torch.softmax(logits, dim=-1)
-            action = torch.multinomial(probs, 1).item()
+            sampled_actions = torch.multinomial(probs, 1).squeeze(1)
 
-        next_state, reward, done, _ = env.step(action)
+        actions_cpu = sampled_actions.detach().cpu().numpy()
 
-        states_list.append(state)
-        actions_list.append(action)
-        rewards_list.append(reward)
-
-        if done:
-            state = env.reset()
+        if isinstance(env_runner, VectorizedEnvRunner):
+            next_states, rewards, dones, _ = env_runner.step(actions_cpu)
+            states_list.append(state_tensor.detach().cpu())
+            actions_list.append(sampled_actions.detach().cpu())
+            rewards_list.append(torch.from_numpy(rewards))
+            states = next_states
         else:
-            state = next_state
+            next_state, reward, done, _ = env_runner.step(int(actions_cpu[0]))
+            states_list.append(state_tensor.detach().cpu())
+            actions_list.append(sampled_actions.detach().cpu())
+            rewards_list.append(torch.tensor([reward], dtype=torch.float32))
+            state = next_state if not done else env_runner.reset()
 
-    states_batch = torch.tensor(np.asarray(states_list, dtype=np.float32))
-    actions_batch = torch.tensor(actions_list, dtype=torch.long)
-    rewards_batch = torch.tensor(rewards_list, dtype=torch.float32)
+        collected += batch_size
+
+    states_batch = torch.cat(states_list, dim=0)[:steps]
+    actions_batch = torch.cat(actions_list, dim=0)[:steps]
+    rewards_batch = torch.cat(rewards_list, dim=0)[:steps]
 
     return states_batch, actions_batch, rewards_batch
 
 
 def ppo_training(
-    env,
+    env_runner,
     policy,
     optimizer,
     device: torch.device,
@@ -379,13 +439,22 @@ def ppo_training(
 
     for epoch in range(args.epochs):
         states_batch_cpu, actions_batch_cpu, rewards_batch_cpu = collect_rollout(
-            env, policy, rollout_steps_per_rank, device, mp_dtype, rank
+            env_runner, policy, rollout_steps_per_rank, device, mp_dtype, rank
         )
 
         dataset = TensorDataset(states_batch_cpu, actions_batch_cpu, rewards_batch_cpu)
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False) if world_size > 1 else None
+        sampler = (
+            DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False)
+            if world_size > 1
+            else None
+        )
         mini_batch = max(1, args.ppo_mini_batch // world_size)
-        num_workers = 2 if len(dataset) > 2 else 0
+        if args.ppo_workers > 0:
+            num_workers = args.ppo_workers
+        else:
+            num_workers = min(8, os.cpu_count() or 1)
+            if len(dataset) < num_workers:
+                num_workers = 0
         loader_kwargs = dict(
             batch_size=mini_batch,
             sampler=sampler,
@@ -478,8 +547,8 @@ def main():
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
 
-    _, df, symbols = load_data(rank)
-    env = create_environment(df, symbols, rank)
+    _, data_map, symbols = load_data(rank)
+    env, env_kwargs = create_environment(data_map, symbols, rank)
 
     policy, optimizer = build_model(device, args, world_size)
 
@@ -487,11 +556,12 @@ def main():
     if rank == 0:
         print(f"✅ Model on GPU ({param_count:,} parameters)")
 
-    dataset = collect_expert_demonstrations(env, rank)
+    dataset = collect_expert_demonstrations(env, args, rank)
     use_cuda_graph = args.enable_cuda_graph and args.mixed_precision == "bf16" and torch.cuda.is_available()
     dataloader, sampler = make_dataloader(dataset, args, world_size, rank, use_cuda_graph)
     bc_training(policy, optimizer, dataloader, sampler, device, args, rank, use_cuda_graph)
-    ppo_training(env, policy, optimizer, device, args, rank, world_size)
+    env_runner = VectorizedEnvRunner(env_kwargs, args.rollout_envs)
+    ppo_training(env_runner, policy, optimizer, device, args, rank, world_size)
 
     cleanup_distributed(distributed_enabled)
 

@@ -15,6 +15,11 @@ from gpu_monitor import GPUMonitor, LoadBalancer
 from trading_environment import create_trading_env
 from s3_data_loader import S3MarketDataLoader
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - tqdm optional
+    tqdm = None
+
 
 # Module-level function for multiprocessing pickle compatibility
 def _create_env_for_training(symbols, enable_multi_market=True, phase="train", external_data=None):
@@ -55,8 +60,45 @@ class DistributedRLOrchestrator:
             'auto_discover_symbols': True, 'symbols': [], 'timeframe': '1Min',
             'augment_data': True, 'enable_multi_market': True, 'crypto_stock_ratio': 0.7,
             'bc_pretrain': True, 'bc_epochs': 5000, 'confidence_threshold': 0.6,
-            'log_interval': 10, 'save_interval': 50
+            'log_interval': 10, 'save_interval': 50,
+            'auto_scale_h100': True,
+            'use_torch_compile': True,
+            'compile_mode': 'max-autotune',
+            'compile_dynamic': True
         }
+
+    def _scale_for_h100(self, gpu_info: Dict):
+        """Aggressively scale config knobs when running on H100 GPUs."""
+        if not self.config.get('auto_scale_h100', True):
+            return
+
+        if not gpu_info.get('available'):
+            return
+
+        has_h100 = any('H100' in gpu.get('name', '') for gpu in gpu_info.get('gpus', []))
+        if not has_h100:
+            return
+
+        original_envs = self.config.get('envs_per_gpu', 256)
+        original_steps = self.config.get('steps_per_rollout', 8192)
+        original_batch = self.config.get('batch_size', 32768)
+        original_ppo_epochs = self.config.get('ppo_epochs', 4)
+        original_step_workers = self.config.get('env_step_workers', 0)
+
+        # Scale up environment count and rollout depth for better GPU utilization
+        self.config['envs_per_gpu'] = max(original_envs, 512)
+        self.config['steps_per_rollout'] = max(original_steps, 16_384)
+        self.config['batch_size'] = max(original_batch, 65_536)
+        self.config['ppo_epochs'] = max(original_ppo_epochs, 6)
+        self.config['env_step_workers'] = max(original_step_workers, 24)
+        self.config['use_torch_compile'] = True
+
+        print("⚙️  H100 detected – scaling training workload aggressively:")
+        print(f"   • envs_per_gpu: {original_envs} → {self.config['envs_per_gpu']}")
+        print(f"   • steps_per_rollout: {original_steps} → {self.config['steps_per_rollout']}")
+        print(f"   • batch_size: {original_batch} → {self.config['batch_size']}")
+        print(f"   • ppo_epochs: {original_ppo_epochs} → {self.config['ppo_epochs']}")
+        print(f"   • env_step_workers: {original_step_workers} → {self.config['env_step_workers']}")
     
     def setup(self):
         """Initialize all components"""
@@ -99,6 +141,7 @@ class DistributedRLOrchestrator:
         if gpu_info['available']:
             self.config['world_size'] = min(self.config['world_size'], gpu_info['count'])
             print(f"✅ Using {self.config['world_size']} GPUs")
+            self._scale_for_h100(gpu_info)
         else:
             print("⚠️ No GPUs detected. Switching to CPU training mode.")
             self.config['world_size'] = 1
@@ -234,9 +277,14 @@ class DistributedRLOrchestrator:
         # Store symbols for env creation
         symbols = self.config['symbols']
         
+        total_epochs = self.config['epochs']
+        progress_bar = None
+        if tqdm:
+            progress_bar = tqdm(total=total_epochs, desc="Epochs", dynamic_ncols=True)
+
         try:
-            for epoch in range(self.config['epochs']):
-                print(f"\n📅 Epoch {epoch+1}/{self.config['epochs']}")
+            for epoch in range(total_epochs):
+                print(f"\n📅 Epoch {epoch+1}/{total_epochs}")
                 
                 # Use module-level function for pickling
                 from functools import partial
@@ -249,18 +297,39 @@ class DistributedRLOrchestrator:
                 metrics = self.distributed_trainer.launch(
                     config=self.config, model_class=TransformerPolicy, env_fn=make_env
                 )
-                
+
                 # Log metrics to Supabase
                 self._log_metrics_to_supabase(epoch + 1, metrics)
-                
+
+                if progress_bar:
+                    latest = None
+                    if metrics:
+                        for item in metrics:
+                            if isinstance(item, dict) and isinstance(item.get('metrics'), dict):
+                                latest = item['metrics']
+                                break
+                    latest = latest or {}
+                    loss = latest.get('loss') if isinstance(latest, dict) else None
+                    reward = latest.get('mean_reward') if isinstance(latest, dict) else None
+                    postfix = {}
+                    if loss is not None:
+                        postfix['loss'] = f"{loss:.3f}"
+                    if reward is not None:
+                        postfix['reward'] = f"{reward:.2f}"
+                    if postfix:
+                        progress_bar.set_postfix(postfix)
+                    progress_bar.update(1)
+
                 if (epoch + 1) % 10 == 0:
                     print(f"💾 Saving checkpoint...")
-                    torch.save({'epoch': epoch, 'config': self.config}, 
+                    torch.save({'epoch': epoch, 'config': self.config},
                               self.checkpoint_dir / f"epoch_{epoch+1}.pt")
-                
+
         except KeyboardInterrupt:
             print("\n⚠️  Interrupted")
         finally:
+            if progress_bar:
+                progress_bar.close()
             self.cleanup()
     
     def _log_metrics_to_supabase(self, epoch: int, metrics: dict):

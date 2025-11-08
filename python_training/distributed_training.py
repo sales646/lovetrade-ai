@@ -13,6 +13,7 @@ import numpy as np
 from typing import Dict, List, Optional
 from datetime import datetime
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 class DistributedTrainer:
     """Manages distributed training across multiple GPUs"""
@@ -85,10 +86,15 @@ class DistributedTrainer:
     ):
         """Training worker for each GPU"""
         try:
-            # Enable TF32 for H100 performance boost
+            # Enable TF32 / high matmul precision for H100 performance boost
             if self.is_cuda_available:
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
+                try:
+                    torch.cuda.matmul.allow_fp16_reduced_precision_reduction(True)
+                except AttributeError:
+                    pass
+                torch.set_float32_matmul_precision("high")
 
             device = torch.device("cuda", rank) if self.is_cuda_available else torch.device("cpu")
             device_label = f"GPU {rank}" if self.is_cuda_available else "CPU"
@@ -114,6 +120,17 @@ class DistributedTrainer:
                     action_dim=config.get('action_dim', 3)
                 ).to(device)
             print(f"[{device_label}] Model created and moved to {device}!")
+
+            compile_enabled = bool(config.get("use_torch_compile", True)) and hasattr(torch, "compile")
+            if compile_enabled:
+                compile_mode = config.get("compile_mode", "max-autotune")
+                compile_dynamic = bool(config.get("compile_dynamic", True))
+                print(f"[{device_label}] torch.compile enabled (mode={compile_mode}, dynamic={compile_dynamic})")
+                try:
+                    model = torch.compile(model, mode=compile_mode, dynamic=compile_dynamic)
+                except TypeError:
+                    # Older torch versions without dynamic kwarg
+                    model = torch.compile(model, mode=compile_mode)
 
             if self.use_bf16 and device.type == "cuda":
                 model = model.to(torch.bfloat16)
@@ -202,10 +219,15 @@ class DistributedTrainer:
 
         # Create vectorized environments for this GPU
         print(f"[{device_label}] Creating {num_envs} environments...")
+        def _to_float_array(obs):
+            if isinstance(obs, np.ndarray):
+                return obs.astype(np.float32, copy=False)
+            return np.asarray(obs, dtype=np.float32)
+
         try:
             envs = [env_fn() for _ in range(num_envs)]
             print(f"[{device_label}] Environments created, resetting...")
-            states = [env.reset() for env in envs]
+            states = [_to_float_array(env.reset()) for env in envs]
             print(f"[{device_label}] Environments ready!")
         except Exception as e:
             print(f"⚠️  Warning on {device_label}: Could not create environments: {e}")
@@ -232,38 +254,62 @@ class DistributedTrainer:
         
         steps_per_rollout = config.get("steps_per_rollout", 8192)  # Much larger rollouts
         
+        step_workers = config.get("env_step_workers")
+        if step_workers is None:
+            # Leave a couple of host threads free for dataloading / NCCL
+            step_workers = min(32, max(4, os.cpu_count() - 2)) if hasattr(os, "cpu_count") else 8
+        else:
+            step_workers = max(1, int(step_workers))
+
+        def _step_env(args):
+            env, action = args
+            return env.step(action)
+
         with torch.no_grad():
-            for step in range(steps_per_rollout):
-                # Batch states - keep everything on GPU for speed
-                state_batch = torch.as_tensor(
-                    np.array(states),
-                    dtype=torch.float32,
-                    device=device
-                )
-                if self.use_bf16 and device.type == "cuda":
-                    state_batch = state_batch.to(torch.bfloat16)
-                
-                # Get actions from policy
-                actions, values, log_probs = model(state_batch)
-                
-                # Step environments - vectorize for efficiency
-                new_states = []
-                actions_cpu = actions.cpu().float().numpy()
-                for i, (env, action) in enumerate(zip(envs, actions_cpu)):
-                    next_state, reward, done, info = env.step(action)
-                    
-                    rollouts['states'].append(states[i])
-                    rollouts['actions'].append(action)  # action is already numpy
-                    rollouts['rewards'].append(float(reward))  # Ensure scalar
-                    rollouts['dones'].append(float(done))  # Ensure scalar
-                    rollouts['values'].append(values[i].cpu().float().item())  # Use .item() for scalar
-                    rollouts['log_probs'].append(log_probs[i].cpu().float().item())  # Use .item() for scalar
-                    
-                    if done:
-                        next_state = env.reset()
-                    new_states.append(next_state)
-                
-                states = new_states
+            executor = ThreadPoolExecutor(max_workers=step_workers)
+            try:
+                for step in range(steps_per_rollout):
+                    # Batch states - keep everything on GPU for speed
+                    try:
+                        state_array = np.asarray(states, dtype=np.float32)
+                    except ValueError:
+                        state_array = np.stack([np.asarray(s, dtype=np.float32) for s in states])
+                    state_batch = torch.as_tensor(
+                        state_array,
+                        dtype=torch.float32,
+                        device=device
+                    )
+                    if self.use_bf16 and device.type == "cuda":
+                        state_batch = state_batch.to(torch.bfloat16)
+
+                    # Get actions from policy
+                    actions, values, log_probs = model(state_batch)
+
+                    # Step environments - vectorize with thread pool for CPU heavy work
+                    actions_cpu = actions.detach().cpu().float().numpy()
+                    step_results = list(executor.map(_step_env, zip(envs, actions_cpu)))
+
+                    new_states = []
+                    values_cpu = values.detach().cpu().float().numpy()
+                    log_probs_cpu = log_probs.detach().cpu().float().numpy()
+
+                    for i, (result, value_item, log_prob_item) in enumerate(zip(step_results, values_cpu, log_probs_cpu)):
+                        next_state, reward, done, info = result
+
+                        rollouts['states'].append(state_array[i].copy())
+                        rollouts['actions'].append(actions_cpu[i])
+                        rollouts['rewards'].append(float(reward))
+                        rollouts['dones'].append(float(done))
+                        rollouts['values'].append(float(value_item))
+                        rollouts['log_probs'].append(float(log_prob_item))
+
+                        if done:
+                            next_state = envs[i].reset()
+                        new_states.append(_to_float_array(next_state))
+
+                    states = new_states
+            finally:
+                executor.shutdown(wait=True)
         
         return rollouts
     
