@@ -13,6 +13,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import boto3
 import gzip
 import io
+import zipfile
 import numpy as np
 import pandas as pd
 
@@ -67,8 +68,28 @@ class S3MarketDataLoader:
 
         try:
             compressed = response["Body"].read()
-            decompressed = gzip.decompress(compressed)
-            df = pd.read_csv(io.BytesIO(decompressed))
+            df: Optional[pd.DataFrame] = None
+            last_gzip_error: Optional[Exception] = None
+
+            try:
+                decompressed = gzip.decompress(compressed)
+                df = pd.read_csv(io.BytesIO(decompressed))
+            except (OSError, EOFError, gzip.BadGzipFile) as gzip_error:
+                last_gzip_error = gzip_error
+
+            if df is None:
+                try:
+                    with zipfile.ZipFile(io.BytesIO(compressed)) as archive:
+                        csv_members = [name for name in archive.namelist() if name.endswith(".csv")]
+                        if not csv_members:
+                            raise ValueError("ZIP archive does not contain a CSV file")
+                        with archive.open(csv_members[0]) as csv_file:
+                            df = pd.read_csv(csv_file)
+                except zipfile.BadZipFile as zip_error:
+                    raise last_gzip_error or zip_error
+
+            if df is None:
+                raise ValueError("Unsupported compression format")
         except Exception as exc:  # pragma: no cover - malformed payloads
             return pd.DataFrame(), "ParseError", str(exc)
 
@@ -77,6 +98,34 @@ class S3MarketDataLoader:
         df = df.sort_values(["ticker", "timestamp"])
 
         return df, None, None
+
+    def _download_with_prefixes(
+        self,
+        date: str,
+        prefixes: Iterable[str],
+        year: str,
+        month: str,
+    ) -> Tuple[pd.DataFrame, Optional[str], Optional[str], Optional[str]]:
+        """Try downloading a day's file using multiple possible prefixes."""
+
+        last_error: Optional[Tuple[str, Optional[str], Optional[str]]] = None
+        tried_prefixes = list(dict.fromkeys(prefixes))
+
+        for prefix in tried_prefixes:
+            file_key = f"{prefix}/minute_aggs_v1/{year}/{month}/{date}.csv.gz"
+            df, error_code, error_msg = self._download_and_parse(file_key)
+            if not df.empty:
+                return df, file_key, None, None
+
+            if error_code or error_msg:
+                if last_error is None or last_error[1] is None:
+                    last_error = (file_key, error_code, error_msg)
+
+        if last_error:
+            file_key, error_code, error_msg = last_error
+            return pd.DataFrame(), file_key, error_code, error_msg
+
+        return pd.DataFrame(), None, "Unknown", "No response from S3"
     
     def load_date_range(
         self,
@@ -103,12 +152,16 @@ class S3MarketDataLoader:
         print(f"📅 Loading {len(dates)} days from S3 ({start_date} to {end_date})...")
         
         # Build file keys
-        prefix = "us_stocks_sip" if asset_type == "stocks" else "global_crypto"
+        if asset_type == "stocks":
+            prefixes = ("us_stocks_sip",)
+        else:
+            # Support both legacy and current crypto prefixes
+            prefixes = ("global_crypto", "crypto")
+
         file_keys = []
         for date in dates:
-            year, month, day = date.split("-")
-            file_key = f"{prefix}/minute_aggs_v1/{year}/{month}/{date}.csv.gz"
-            file_keys.append((date, file_key))
+            year, month, _ = date.split("-")
+            file_keys.append((date, prefixes, year, month))
         
         # Download in parallel
         all_dfs = []
@@ -116,23 +169,25 @@ class S3MarketDataLoader:
         error_examples: Dict[str, Tuple[str, str]] = {}
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self._download_and_parse, fk): (date, fk)
-                      for date, fk in file_keys}
+            futures = {
+                executor.submit(self._download_with_prefixes, date, prefixes, year, month): (date, prefixes)
+                for date, prefixes, year, month in file_keys
+            }
 
             for future in as_completed(futures):
-                date, file_key = futures[future]
-                df, error_code, error_msg = future.result()
+                date, prefixes = futures[future]
+                df, file_key, error_code, error_msg = future.result()
                 if not df.empty:
                     all_dfs.append(df)
                     print(f"  ✅ {date}: {len(df):,} rows, {df['ticker'].nunique()} symbols")
                 elif error_code:
                     error_counts[error_code] += 1
                     if error_code not in error_examples:
-                        error_examples[error_code] = (file_key, error_msg or "")
+                        error_examples[error_code] = (file_key or prefixes[0], error_msg or "")
                 elif error_msg:
                     error_counts["Unknown"] += 1
                     if "Unknown" not in error_examples:
-                        error_examples["Unknown"] = (file_key, error_msg)
+                        error_examples["Unknown"] = (file_key or prefixes[0], error_msg)
 
         if error_counts:
             for code, count in sorted(error_counts.items(), key=lambda item: item[0]):
