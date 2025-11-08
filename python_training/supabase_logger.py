@@ -47,15 +47,40 @@ class SupabaseLogger:
                 self._enabled = False
                 self._client = None
 
+    @staticmethod
+    def _jsonify(data: Any) -> Any:
+        if isinstance(data, (str, int, float, bool)) or data is None:
+            return data
+        try:
+            return json.loads(json.dumps(data, default=str))
+        except (TypeError, ValueError):
+            return json.dumps(data, default=str)
+
     def start_run(self, config: Dict[str, Any]) -> Optional[str]:
         if not self._enabled:
             return None
-        self.run_id = config.get("id") or str(uuid.uuid4())
+
+        config_copy = dict(config)
+        self.run_id = config_copy.get("id") or str(uuid.uuid4())
+
+        run_name = config_copy.get("run_name") or f"run-{self.run_id[:8]}"
+        phase = config_copy.get("phase") or "initializing"
+        status = config_copy.get("status") or "running"
+
+        hyperparams = config_copy.get("hyperparams")
+        if hyperparams is None:
+            excluded = {"id", "run_name", "phase", "status", "config"}
+            hyperparams = {k: v for k, v in config_copy.items() if k not in excluded}
+
         payload = {
             "id": self.run_id,
-            "config": json.dumps(config, default=str),
-            "status": "running",
+            "run_name": run_name,
+            "phase": phase,
+            "hyperparams": self._jsonify(hyperparams or {}),
+            "status": status,
+            "config": self._jsonify(config_copy.get("config", config_copy)),
         }
+
         self._enqueue("training_runs", payload)
         return self.run_id
 
