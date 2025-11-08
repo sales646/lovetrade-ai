@@ -15,6 +15,7 @@ from torch.utils.checkpoint import checkpoint_sequential
 from torch.utils.data import DataLoader, DistributedSampler, TensorDataset
 
 import sys
+from progress import PhaseProgress
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimized GPU training")
@@ -119,7 +120,6 @@ def create_environment(data_map, symbols, rank: int):
 # ====================
 # STEP 4: Neural Network
 # ====================
-print("\n[STEP 4/6] Creating Neural Network")
 
 class SimplePolicy(nn.Module):
     """Simple but effective policy network"""
@@ -152,18 +152,44 @@ class SimplePolicy(nn.Module):
         return action_logits, value
 
 
-def build_model(device: torch.device, args: argparse.Namespace, world_size: int):
+def build_model(device: torch.device, args: argparse.Namespace, world_size: int, rank: int, progress: PhaseProgress):
+    if rank == 0:
+        print("\n[STEP 4/6] Creating Neural Network")
+        print("   Initializing policy network...")
+    
     policy = SimplePolicy(checkpoint_splits=args.checkpoint_splits).to(device)
 
+    if rank == 0:
+        print("   Initializing optimizer...")
+    
     optimizer_kwargs = dict(lr=0.0003, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
     try:
         optimizer = optim.AdamW(policy.parameters(), fused=True, **optimizer_kwargs)
     except TypeError:
         optimizer = optim.AdamW(policy.parameters(), **optimizer_kwargs)
 
-    policy = torch.compile(policy, mode=args.compile_mode, fullgraph=True)
+    # Make torch.compile optional and less aggressive
+    if args.compile_mode != "none":
+        if rank == 0:
+            print(f"   Compiling model (mode: {args.compile_mode})...")
+            print("   ⏳ This may take 5-15 minutes on first run, please wait...")
+        
+        with progress.track("Model Compilation", total=100, unit="%") as pbar:
+            if rank == 0:
+                pbar.update(10)
+            policy = torch.compile(policy, mode=args.compile_mode, fullgraph=False)
+            if rank == 0:
+                pbar.update(90)
+        
+        if rank == 0:
+            print("   ✅ Compilation complete")
+    else:
+        if rank == 0:
+            print("   ⏩ Skipping compilation (--compile-mode=none)")
 
     if world_size > 1:
+        if rank == 0:
+            print("   Wrapping with DistributedDataParallel...")
         policy = DDP(
             policy,
             device_ids=[device.index],
@@ -547,10 +573,12 @@ def main():
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
 
+    progress = PhaseProgress()
+
     _, data_map, symbols = load_data(rank)
     env, env_kwargs = create_environment(data_map, symbols, rank)
 
-    policy, optimizer = build_model(device, args, world_size)
+    policy, optimizer = build_model(device, args, world_size, rank, progress)
 
     param_count = sum(p.numel() for p in policy.parameters())
     if rank == 0:
@@ -563,6 +591,7 @@ def main():
     env_runner = VectorizedEnvRunner(env_kwargs, args.rollout_envs)
     ppo_training(env_runner, policy, optimizer, device, args, rank, world_size)
 
+    progress.close_all()
     cleanup_distributed(distributed_enabled)
 
 
