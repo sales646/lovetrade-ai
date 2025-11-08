@@ -7,6 +7,7 @@ import os
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import boto3
@@ -14,6 +15,8 @@ import gzip
 import io
 import numpy as np
 import pandas as pd
+
+from botocore.exceptions import ClientError
 
 try:  # Optional dependency for nicer CLI feedback
     from tqdm.auto import tqdm
@@ -46,22 +49,34 @@ class S3MarketDataLoader:
         self.cache_size_bytes = int(cache_size_gb * 1e9)
         self.current_cache_size = 0
         
-    def _download_and_parse(self, file_key: str) -> pd.DataFrame:
-        """Download and parse a single S3 file"""
+    def _download_and_parse(self, file_key: str) -> Tuple[pd.DataFrame, Optional[str], Optional[str]]:
+        """Download and parse a single S3 file.
+
+        Returns the dataframe along with an optional error code/message so that
+        the caller can aggregate warnings instead of spamming the console for
+        every missing day.
+        """
+
         try:
             response = self.s3_client.get_object(Bucket=self.bucket, Key=file_key)
-            compressed = response['Body'].read()
+        except ClientError as exc:  # pragma: no cover - requires network
+            error = exc.response.get("Error", {})
+            return pd.DataFrame(), error.get("Code"), error.get("Message")
+        except Exception as exc:  # pragma: no cover - defensive
+            return pd.DataFrame(), "Unknown", str(exc)
+
+        try:
+            compressed = response["Body"].read()
             decompressed = gzip.decompress(compressed)
             df = pd.read_csv(io.BytesIO(decompressed))
-            
-            # Convert window_start from nanoseconds to datetime
-            df['timestamp'] = pd.to_datetime(df['window_start'], unit='ns')
-            df = df.sort_values(['ticker', 'timestamp'])
-            
-            return df
-        except Exception as e:
-            print(f"⚠️ Error loading {file_key}: {e}")
-            return pd.DataFrame()
+        except Exception as exc:  # pragma: no cover - malformed payloads
+            return pd.DataFrame(), "ParseError", str(exc)
+
+        # Convert window_start from nanoseconds to datetime
+        df["timestamp"] = pd.to_datetime(df["window_start"], unit="ns")
+        df = df.sort_values(["ticker", "timestamp"])
+
+        return df, None, None
     
     def load_date_range(
         self,
@@ -97,17 +112,52 @@ class S3MarketDataLoader:
         
         # Download in parallel
         all_dfs = []
+        error_counts: Dict[str, int] = defaultdict(int)
+        error_examples: Dict[str, Tuple[str, str]] = {}
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self._download_and_parse, fk): date 
+            futures = {executor.submit(self._download_and_parse, fk): (date, fk)
                       for date, fk in file_keys}
-            
+
             for future in as_completed(futures):
-                date = futures[future]
-                df = future.result()
+                date, file_key = futures[future]
+                df, error_code, error_msg = future.result()
                 if not df.empty:
                     all_dfs.append(df)
                     print(f"  ✅ {date}: {len(df):,} rows, {df['ticker'].nunique()} symbols")
-        
+                elif error_code:
+                    error_counts[error_code] += 1
+                    if error_code not in error_examples:
+                        error_examples[error_code] = (file_key, error_msg or "")
+                elif error_msg:
+                    error_counts["Unknown"] += 1
+                    if "Unknown" not in error_examples:
+                        error_examples["Unknown"] = (file_key, error_msg)
+
+        if error_counts:
+            for code, count in sorted(error_counts.items(), key=lambda item: item[0]):
+                sample_key, sample_message = error_examples.get(code, ("", ""))
+                if code in {"403", "AccessDenied"}:
+                    print(
+                        f"⚠️  Access denied for {count} {asset_type} file(s); "
+                        f"example: {sample_key or 'unknown'} ({sample_message or 'permission denied'})"
+                    )
+                elif code in {"NoSuchKey", "404"}:
+                    print(
+                        f"⚠️  Missing {count} {asset_type} file(s); "
+                        f"example: {sample_key or 'unknown'}"
+                    )
+                elif code == "ParseError":
+                    print(
+                        f"⚠️  Failed to parse {count} {asset_type} file(s); "
+                        f"example: {sample_key or 'unknown'} ({sample_message})"
+                    )
+                else:
+                    print(
+                        f"⚠️  Error loading {count} {asset_type} file(s); "
+                        f"example: {sample_key or 'unknown'} ({sample_message})"
+                    )
+
         # Combine all dates
         if not all_dfs:
             print("❌ No data loaded!")
